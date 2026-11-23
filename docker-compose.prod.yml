@@ -1,0 +1,23 @@
+# Production: API + Next only (no Postgres/Redis; API uses in-memory fake data)
+services:
+  api:
+    build: ./api
+    restart: unless-stopped
+    ports:
+      - "3101:3001"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-prod}
+      VIP_REQUIRED: ${VIP_REQUIRED:-false}
+      TZ: Asia/Hong_Kong
+      CORS_ORIGINS: https://smart.b.ezcoin.ink,http://smart.b.ezcoin.ink,http://localhost:3100
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:3001
+      TZ: Asia/Hong_Kong
+    depends_on:
+      - api

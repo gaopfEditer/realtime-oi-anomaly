@@ -1,0 +1,860 @@
+const express = require('express');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+
+const app = express();
+const PORT = Number(process.env.PORT) || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+const VIP_REQUIRED = String(process.env.VIP_REQUIRED || 'false').toLowerCase() === 'true';
+
+const DEMO_USER = { email: 'demo@local.dev', password: 'demo123', vip: true };
+
+const EVENT_TYPES = [
+  { key: 'price_surge', label: '价格急涨', kind: 'price', side: 'up' },
+  { key: 'price_dump', label: '价格急跌', kind: 'price', side: 'down' },
+  { key: 'oi_surge', label: 'OI暴增', kind: 'oi', side: 'up' },
+  { key: 'oi_dump', label: 'OI暴跌', kind: 'oi', side: 'down' },
+];
+
+const SYMBOL_POOL = [
+  { symbol: 'BTC', name: 'Bitcoin', category: '主流', region: null, basePrice: 84200, baseOi: 12_800_000_000 },
+  { symbol: 'ETH', name: 'Ethereum', category: '主流', region: null, basePrice: 3180, baseOi: 5_420_000_000 },
+  { symbol: 'SOL', name: 'Solana', category: 'Layer1', region: null, basePrice: 178.4, baseOi: 1_120_000_000 },
+  { symbol: 'XRP', name: 'XRP', category: '主流', region: null, basePrice: 2.21, baseOi: 780_000_000 },
+  { symbol: 'BNB', name: 'BNB', category: '主流', region: null, basePrice: 612, baseOi: 540_000_000 },
+  { symbol: 'DOGE', name: 'Dogecoin', category: 'Meme', region: null, basePrice: 0.186, baseOi: 420_000_000 },
+  { symbol: 'PEPE', name: 'Pepe', category: 'Meme', region: null, basePrice: 0.0000098, baseOi: 310_000_000 },
+  { symbol: 'WIF', name: 'dogwifhat', category: 'Meme', region: null, basePrice: 2.45, baseOi: 186_000_000 },
+  { symbol: 'AVAX', name: 'Avalanche', category: 'Layer1', region: null, basePrice: 38.6, baseOi: 265_000_000 },
+  { symbol: 'LINK', name: 'Chainlink', category: 'DeFi', region: null, basePrice: 16.8, baseOi: 198_000_000 },
+  { symbol: 'UNI', name: 'Uniswap', category: 'DeFi', region: null, basePrice: 9.4, baseOi: 142_000_000 },
+  { symbol: 'AAVE', name: 'Aave', category: 'DeFi', region: null, basePrice: 218, baseOi: 168_000_000 },
+  { symbol: 'CRV', name: 'Curve DAO', category: 'DeFi', region: null, basePrice: 0.68, baseOi: 156_000_000 },
+  { symbol: 'ARB', name: 'Arbitrum', category: 'Layer1', region: null, basePrice: 0.72, baseOi: 210_000_000 },
+  { symbol: 'OP', name: 'Optimism', category: 'Layer1', region: null, basePrice: 1.58, baseOi: 155_000_000 },
+  { symbol: 'SUI', name: 'Sui', category: 'Layer1', region: null, basePrice: 2.85, baseOi: 390_000_000 },
+  { symbol: 'APT', name: 'Aptos', category: 'Layer1', region: null, basePrice: 8.9, baseOi: 176_000_000 },
+  { symbol: 'NEAR', name: 'NEAR', category: 'AI', region: null, basePrice: 4.65, baseOi: 148_000_000 },
+  { symbol: 'FET', name: 'Fetch.ai', category: 'AI', region: null, basePrice: 1.42, baseOi: 122_000_000 },
+  { symbol: 'TAO', name: 'Bittensor', category: 'AI', region: null, basePrice: 485, baseOi: 205_000_000 },
+  { symbol: 'RNDR', name: 'Render', category: 'AI', region: null, basePrice: 6.8, baseOi: 134_000_000 },
+  { symbol: 'IMX', name: 'Immutable', category: 'GameFi', region: null, basePrice: 1.15, baseOi: 98_000_000 },
+  { symbol: 'GALA', name: 'Gala', category: 'GameFi', region: null, basePrice: 0.038, baseOi: 86_000_000 },
+  { symbol: 'INJ', name: 'Injective', category: 'DeFi', region: null, basePrice: 22.4, baseOi: 160_000_000 },
+  { symbol: 'TIA', name: 'Celestia', category: 'Layer1', region: null, basePrice: 5.1, baseOi: 188_000_000 },
+  { symbol: 'SEI', name: 'Sei', category: 'Layer1', region: null, basePrice: 0.42, baseOi: 112_000_000 },
+  { symbol: 'ORDI', name: 'ORDI', category: 'Meme', region: null, basePrice: 28.5, baseOi: 95_000_000 },
+  { symbol: 'BONK', name: 'Bonk', category: 'Meme', region: null, basePrice: 0.000021, baseOi: 145_000_000 },
+  { symbol: 'WLD', name: 'Worldcoin', category: 'AI', region: null, basePrice: 2.05, baseOi: 128_000_000 },
+  { symbol: 'FIL', name: 'Filecoin', category: 'AI', region: null, basePrice: 4.8, baseOi: 102_000_000 },
+  { symbol: 'TON', name: 'Toncoin', category: 'Layer1', region: null, basePrice: 5.4, baseOi: 220_000_000 },
+  { symbol: 'TSLA', name: 'Tesla', category: 'Stock', region: 'US', basePrice: 248, baseOi: 420_000_000 },
+  { symbol: 'NVDA', name: 'NVIDIA', category: 'Stock', region: 'US', basePrice: 138, baseOi: 510_000_000 },
+  { symbol: 'AAPL', name: 'Apple', category: 'Stock', region: 'US', basePrice: 226, baseOi: 380_000_000 },
+];
+
+const BOARD_WINDOWS = ['15m', '30m', '1h', '4h', '1d', '3d'];
+// Exact mercu-style 4×4 labels (▲/▼ in title)
+const BOARD_KINDS = [
+  { key: 'gainers_value', title: '▲ 涨幅榜 / 按金额 (%)', side: 'up', metric: 'pct', unit: '%' },
+  { key: 'losers_value', title: '▼ 跌幅榜 / 按金额 (%)', side: 'down', metric: 'pct', unit: '%' },
+  { key: 'gainers_strength', title: '▲ 涨幅榜 / 按强度 (Str)', side: 'up', metric: 'strength', unit: 'Str' },
+  { key: 'losers_strength', title: '▼ 跌幅榜 / 按强度 (Str)', side: 'down', metric: 'strength', unit: 'Str' },
+  { key: 'oi_up_value', title: '▲ 未平仓 / 按金额 (USDT)', side: 'up', metric: 'value', unit: 'USDT' },
+  { key: 'oi_down_value', title: '▼ 未平仓 / 按金额 (USDT)', side: 'down', metric: 'value', unit: 'USDT' },
+  { key: 'oi_up_strength', title: '▲ 未平仓 / 按强度 (Str)', side: 'up', metric: 'strength', unit: 'Str' },
+  { key: 'oi_down_strength', title: '▼ 未平仓 / 按强度 (Str)', side: 'down', metric: 'strength', unit: 'Str' },
+  { key: 'perp_in_value', title: '▲ 永续流入 / 按金额 (USDT)', side: 'up', metric: 'value', unit: 'USDT' },
+  { key: 'perp_out_value', title: '▼ 永续流出 / 按金额 (USDT)', side: 'down', metric: 'value', unit: 'USDT' },
+  { key: 'perp_in_strength', title: '▲ 永续流入 / 按强度 (Str)', side: 'up', metric: 'strength', unit: 'Str' },
+  { key: 'perp_out_strength', title: '▼ 永续流出 / 按强度 (Str)', side: 'down', metric: 'strength', unit: 'Str' },
+  { key: 'spot_in_value', title: '▲ 现货流入 / 按金额 (USDT)', side: 'up', metric: 'value', unit: 'USDT' },
+  { key: 'spot_out_value', title: '▼ 现货流出 / 按金额 (USDT)', side: 'down', metric: 'value', unit: 'USDT' },
+  { key: 'spot_in_strength', title: '▲ 现货流入 / 按强度 (Str)', side: 'up', metric: 'strength', unit: 'Str' },
+  { key: 'spot_out_strength', title: '▼ 现货流出 / 按强度 (Str)', side: 'down', metric: 'strength', unit: 'Str' },
+];
+
+const EXCHANGES = ['Binance', 'OKX', 'Bybit', 'Bitget', 'Gate', 'HTX'];
+const POLL_HINT_MS = 12000;
+const DRIFT_MS = 15000;
+const BOARD_REFRESH_MS = 90000;
+const BOARD_JITTER_MS = 40000;
+const NEW_CARD_MIN_MS = 70000;
+const NEW_CARD_MAX_MS = 120000;
+const TARGET_FEED = 96;
+
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function formatUsd(n) {
+  const abs = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;
+  return `${sign}$${abs.toFixed(0)}`;
+}
+function formatPct(n) {
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}%`;
+}
+function findMeta(symbol) {
+  return SYMBOL_POOL.find((s) => s.symbol === String(symbol || '').toUpperCase()) || null;
+}
+function effectiveVip(req) {
+  if (!VIP_REQUIRED) return true;
+  return Boolean(req.vip);
+}
+function hhmm(ts) {
+  // Always Asia/Hong_Kong so cards match user local time even if container is UTC
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Hong_Kong',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(ts));
+}
+
+let anomalySeq = 1;
+const anomalies = [];
+const hotBoards = {};
+let overview = {};
+let boardsUpdatedAt = Date.now();
+
+function buildLastLine(a) {
+  if (a.eventKind === 'price') return `近5分钟  价格 ${formatPct(a.pricePct)}`;
+  return `近5分钟  OI ${formatUsd(a.oiDeltaAbs)} (${formatPct(a.oiDeltaPct)})`;
+}
+
+function makeChips() {
+  // not always all three — randomly drop one
+  const chips = {};
+  const self = Math.floor(rand(1, 48));
+  const mktS = Math.floor(rand(1, 48));
+  const mktV = Math.floor(rand(1, 48));
+  const drop = Math.random();
+  if (drop > 0.18) chips.self = self;
+  if (drop > 0.12 || !chips.self) chips.mktStrength = mktS;
+  if (drop < 0.85 || Object.keys(chips).length < 2) chips.mktValue = mktV;
+  return chips;
+}
+
+function makeAnomaly(preferOi = false, forcedMeta = null, ageSecOverride = null) {
+  const meta = forcedMeta || pick(SYMBOL_POOL);
+  const pool = preferOi ? EVENT_TYPES.filter((e) => e.kind === 'oi') : EVENT_TYPES;
+  const ev = pick(pool);
+  const ageSec = ageSecOverride != null ? ageSecOverride : Math.floor(rand(60, 7200));
+  const pricePct = Number((rand(0.4, 9.5) * (ev.side === 'down' ? -1 : 1)).toFixed(2));
+  const oiDeltaPct = Number((rand(1.2, 22) * (ev.side === 'down' ? -1 : 1)).toFixed(2));
+  const oiDeltaAbs =
+    Math.round(meta.baseOi * (Math.abs(oiDeltaPct) / 100) * rand(0.4, 1.1)) * Math.sign(oiDeltaPct);
+  const price = Number(
+    (meta.basePrice * (1 + rand(-0.01, 0.01))).toPrecision(meta.basePrice >= 1 ? 6 : 4),
+  );
+  const ts = Date.now() - ageSec * 1000;
+  const a = {
+    id: `a-${anomalySeq++}`,
+    ts,
+    ageSec,
+    timeLabel: hhmm(ts),
+    symbol: meta.symbol,
+    name: meta.name,
+    category: meta.category,
+    region: meta.region,
+    event: ev.key,
+    eventLabel: ev.label,
+    eventKind: ev.kind,
+    side: ev.side,
+    window: '5m',
+    price,
+    pricePct,
+    oiDeltaAbs,
+    oiDeltaAbsDisplay: formatUsd(oiDeltaAbs),
+    oiDeltaPct,
+    chips: makeChips(),
+  };
+  a.lastLine = buildLastLine(a);
+  return a;
+}
+
+function seedAnomalies() {
+  anomalies.length = 0;
+  for (let i = 0; i < TARGET_FEED; i += 1) {
+    anomalies.push(makeAnomaly(i % 3 !== 2, null, Math.floor(60 + i * 70 + rand(0, 40))));
+  }
+  for (let i = 0; i < 5; i += 1) {
+    anomalies.push(makeAnomaly(true, findMeta('CRV'), Math.floor(120 + i * 400)));
+  }
+  anomalies.sort((a, b) => b.ts - a.ts);
+  while (anomalies.length > TARGET_FEED) anomalies.pop();
+}
+
+function makeBoardRow(meta, side, metric) {
+  const sign = side === 'down' ? -1 : 1;
+  let value;
+  let display;
+  let strength = Number(rand(8, 96).toFixed(1));
+  if (metric === 'value') {
+    value = Math.round(meta.baseOi * rand(0.002, 0.08)) * sign;
+    display = formatUsd(value);
+  } else if (metric === 'strength') {
+    value = strength * sign;
+    display = Math.abs(value).toFixed(1);
+  } else {
+    value = Number((rand(0.3, 12) * sign).toFixed(2));
+    display = formatPct(value);
+    strength = Math.min(99, Math.abs(value) * 8 + rand(0, 20));
+  }
+  const ticks = BOARD_WINDOWS.map(() => Number((rand(0.15, 1) * (Math.random() > 0.35 ? 1 : 0.25)).toFixed(2)));
+  return {
+    symbol: meta.symbol,
+    name: meta.name,
+    category: meta.category,
+    region: meta.region,
+    value,
+    display,
+    strength: Number(strength.toFixed(1)),
+    bar: Math.min(100, Math.abs(strength)),
+    ticks,
+    side,
+  };
+}
+
+function rebuildHotBoards() {
+  for (const win of BOARD_WINDOWS) {
+    hotBoards[win] = {};
+    for (const kind of BOARD_KINDS) {
+      const shuffled = [...SYMBOL_POOL].sort(() => Math.random() - 0.5).slice(0, 8);
+      if (kind.key.startsWith('oi_') && !shuffled.find((s) => s.symbol === 'CRV')) {
+        shuffled[shuffled.length - 1] = findMeta('CRV');
+      }
+      const rows = shuffled
+        .map((m) => makeBoardRow(m, kind.side, kind.metric))
+        .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
+        .map((r, i) => ({ ...r, rank: i + 1 }));
+      hotBoards[win][kind.key] = { ...kind, window: win, rows };
+    }
+  }
+  boardsUpdatedAt = Date.now();
+}
+
+function gentleJitterBoards() {
+  for (const win of BOARD_WINDOWS) {
+    for (const kind of BOARD_KINDS) {
+      const board = hotBoards[win]?.[kind.key];
+      if (!board) continue;
+      for (const row of board.rows) {
+        const factor = 1 + rand(-0.025, 0.025);
+        if (kind.metric === 'value') {
+          row.value = Math.round(row.value * factor);
+          row.display = formatUsd(row.value);
+        } else if (kind.metric === 'pct') {
+          row.value = Number((row.value * factor).toFixed(2));
+          row.display = formatPct(row.value);
+        } else {
+          row.value = Number((row.value * factor).toFixed(1));
+          row.display = Math.abs(row.value).toFixed(1);
+          row.strength = Math.abs(row.value);
+          row.bar = Math.min(100, row.strength);
+        }
+      }
+    }
+  }
+  boardsUpdatedAt = Date.now();
+}
+
+/** In-place drift on existing anomaly numbers — keep ids/ts stable */
+function driftAnomalies() {
+  for (const a of anomalies) {
+    if (Math.random() > 0.55) continue;
+    if (a.eventKind === 'price') {
+      a.pricePct = Number((a.pricePct * (1 + rand(-0.04, 0.04))).toFixed(2));
+      if (Math.abs(a.pricePct) < 0.2) a.pricePct = a.side === 'up' ? 0.35 : -0.35;
+    } else {
+      a.oiDeltaPct = Number((a.oiDeltaPct * (1 + rand(-0.04, 0.04))).toFixed(2));
+      a.oiDeltaAbs = Math.round(a.oiDeltaAbs * (1 + rand(-0.03, 0.03)));
+      a.oiDeltaAbsDisplay = formatUsd(a.oiDeltaAbs);
+    }
+    a.lastLine = buildLastLine(a);
+    a.ageSec = Math.max(0, Math.floor((Date.now() - a.ts) / 1000));
+    a.timeLabel = hhmm(a.ts);
+  }
+}
+
+function scoreSymbolsAcrossBoards() {
+  const boardWin = hotBoards['15m'] || {};
+  const map = new Map();
+  for (const kind of BOARD_KINDS) {
+    const b = boardWin[kind.key];
+    if (!b?.rows) continue;
+    for (const row of b.rows.slice(0, 6)) {
+      const cur = map.get(row.symbol) || {
+        symbol: row.symbol,
+        name: row.name,
+        boardCount: 0,
+        up: 0,
+        down: 0,
+        strengthSum: 0,
+      };
+      cur.boardCount += 1;
+      if (row.side === 'up') cur.up += 1;
+      else cur.down += 1;
+      cur.strengthSum += Math.abs(Number(row.strength) || 0);
+      map.set(row.symbol, cur);
+    }
+  }
+  return [...map.values()];
+}
+
+function flowLabel(item) {
+  if (item.up >= item.down + 2) return '流入';
+  if (item.down >= item.up + 2) return '流出';
+  return '混合';
+}
+
+function rebuildOverview() {
+  const up = anomalies.filter((a) => a.side === 'up').length;
+  const down = anomalies.filter((a) => a.side === 'down').length;
+  const oiNet = anomalies
+    .filter((a) => a.eventKind === 'oi')
+    .reduce((s, a) => s + a.oiDeltaAbs, 0);
+  const scored = scoreSymbolsAcrossBoards();
+  const confluenceList = [...scored]
+    .sort((a, b) => b.boardCount - a.boardCount || b.strengthSum - a.strengthSum)
+    .slice(0, 8)
+    .map((s, i) => ({
+      rank: i + 1,
+      symbol: s.symbol,
+      boardCount: s.boardCount,
+      flow: flowLabel(s),
+      side: flowLabel(s) === '流出' ? 'down' : flowLabel(s) === '流入' ? 'up' : 'flat',
+    }));
+  const intensityList = [...scored]
+    .map((s) => ({
+      ...s,
+      intensity: Number((s.strengthSum / Math.max(1, s.boardCount)).toFixed(1)),
+    }))
+    .sort((a, b) => b.intensity - a.intensity)
+    .slice(0, 8)
+    .map((s, i) => ({
+      rank: i + 1,
+      symbol: s.symbol,
+      boardCount: s.boardCount,
+      intensity: s.intensity,
+      flow: flowLabel(s),
+      side: flowLabel(s) === '流出' ? 'down' : flowLabel(s) === '流入' ? 'up' : 'flat',
+    }));
+
+  let inflowBoards = 0;
+  let outflowBoards = 0;
+  for (const kind of BOARD_KINDS) {
+    if (kind.side === 'up') inflowBoards += 1;
+    else outflowBoards += 1;
+  }
+  const totalBoards = BOARD_KINDS.length;
+  let bias = '混合';
+  const inCount = confluenceList.filter((x) => x.flow === '流入').length;
+  const outCount = confluenceList.filter((x) => x.flow === '流出').length;
+  if (inCount >= outCount + 2) bias = '流入';
+  else if (outCount >= inCount + 2) bias = '流出';
+
+  const perpNet = Math.round(rand(-8e8, 1.2e9));
+  const spotNet = Math.round(rand(-4e8, 6e8));
+  const regimes = ['风险偏好', '避险', '中性', '轮动'];
+  const regime = pick(regimes);
+  const vsPrior = (n) => formatPct(n);
+
+  overview = {
+    updatedAt: Date.now(),
+    flowBias: {
+      label: bias,
+      confluence: `${Math.max(inCount, outCount)}/${confluenceList.length || totalBoards}`,
+      intensity: Number(rand(22, 92).toFixed(1)),
+      boards: totalBoards,
+      inflowBoards,
+      outflowBoards,
+      bias,
+    },
+    confluenceList,
+    intensityList,
+    market: {
+      perpNetInflow: perpNet,
+      perpNetInflowDisplay: formatUsd(perpNet),
+      perpRegime: pick(regimes),
+      perpVsPrior: vsPrior(rand(-18, 22)),
+      spotNetInflow: spotNet,
+      spotNetInflowDisplay: formatUsd(spotNet),
+      spotRegime: pick(regimes),
+      spotVsPrior: vsPrior(rand(-18, 22)),
+      oiNetChange: oiNet,
+      oiNetChangeDisplay: formatUsd(oiNet),
+      oiNetSide: oiNet >= 0 ? 'up' : 'down',
+      oiRegime: oiNet >= 0 ? '扩张' : '收缩',
+      oiVsPrior: vsPrior(rand(-18, 22)),
+      breadthUp: up,
+      breadthDown: down,
+      breadthRatio: up + down ? Number(((up / (up + down)) * 100).toFixed(1)) : 50,
+      breadthDisplay: `${up}/${down}`,
+      breadthRegime: up >= down ? '偏多' : '偏空',
+      breadthVsPrior: vsPrior(rand(-18, 22)),
+      regime,
+      vsPrior: vsPrior(rand(-18, 22)),
+    },
+    marketRows: [
+      {
+        key: 'perp',
+        label: '永续净流入',
+        value: formatUsd(perpNet),
+        side: perpNet >= 0 ? 'up' : 'down',
+        regime: pick(regimes),
+        vsPrior: vsPrior(rand(-18, 22)),
+      },
+      {
+        key: 'spot',
+        label: '现货净流入',
+        value: formatUsd(spotNet),
+        side: spotNet >= 0 ? 'up' : 'down',
+        regime: pick(regimes),
+        vsPrior: vsPrior(rand(-18, 22)),
+      },
+      {
+        key: 'oi',
+        label: 'OI净变化',
+        value: formatUsd(oiNet),
+        side: oiNet >= 0 ? 'up' : 'down',
+        regime: oiNet >= 0 ? '扩张' : '收缩',
+        vsPrior: vsPrior(rand(-18, 22)),
+      },
+      {
+        key: 'breadth',
+        label: '市场广度',
+        value: `${up}↑ / ${down}↓`,
+        side: up >= down ? 'up' : 'down',
+        regime: up >= down ? '偏多' : '偏空',
+        vsPrior: vsPrior(rand(-18, 22)),
+      },
+    ],
+    oiNetChange: oiNet,
+    oiNetChangeDisplay: formatUsd(oiNet),
+    oiNetSide: oiNet >= 0 ? 'up' : 'down',
+    breadthUp: up,
+    breadthDown: down,
+    stats: {
+      oiSurges: anomalies.filter((a) => a.event === 'oi_surge').length,
+      oiDumps: anomalies.filter((a) => a.event === 'oi_dump').length,
+      priceMoves: anomalies.filter((a) => a.eventKind === 'price').length,
+    },
+  };
+}
+
+function sparkline(n = 24, base = 1) {
+  const pts = [];
+  let v = base;
+  for (let i = 0; i < n; i += 1) {
+    v *= 1 + rand(-0.02, 0.02);
+    pts.push(Number(v.toFixed(6)));
+  }
+  return pts;
+}
+
+function buildCoinDetail(symbol) {
+  const meta = findMeta(symbol);
+  if (!meta) return null;
+  const change24h = Number(rand(-6.5, 7.5).toFixed(2));
+  const price = Number(
+    (meta.basePrice * (1 + rand(-0.008, 0.008))).toPrecision(meta.basePrice >= 1 ? 6 : 4),
+  );
+  const oi = meta.baseOi * (1 + rand(-0.05, 0.05));
+  const oiDelta24h = oi * rand(-0.08, 0.12);
+  const perpVol = meta.baseOi * rand(0.4, 1.6);
+  const spotVol = meta.baseOi * rand(0.15, 0.9);
+  const funding = Number(rand(-0.045, 0.055).toFixed(4));
+  const basis = Number(rand(-0.8, 1.2).toFixed(3));
+
+  const relatedAnomalies = anomalies
+    .filter((a) => a.symbol === meta.symbol)
+    .slice(0, 10)
+    .map((a) => ({
+      id: a.id,
+      eventLabel: a.eventLabel,
+      eventKind: a.eventKind,
+      side: a.side,
+      lastLine: a.lastLine,
+      ageSec: a.ageSec,
+      timeLabel: a.timeLabel,
+      ts: a.ts,
+      oiDeltaAbsDisplay: a.oiDeltaAbsDisplay,
+      oiDeltaPct: a.oiDeltaPct,
+      pricePct: a.pricePct,
+      chips: a.chips,
+    }));
+
+  const relatedRanks = [];
+  for (const kind of BOARD_KINDS) {
+    const board = hotBoards['15m']?.[kind.key];
+    if (!board) continue;
+    const row = (board.rows || []).find((r) => r.symbol === meta.symbol);
+    if (row) {
+      relatedRanks.push({
+        boardKey: kind.key,
+        boardTitle: kind.title,
+        window: '15m',
+        rank: row.rank,
+        display: row.display,
+        strength: row.strength,
+        side: row.side,
+      });
+    }
+  }
+
+  let oiShareLeft = 100;
+  const oiByExchange = EXCHANGES.map((ex, i) => {
+    const share = i === EXCHANGES.length - 1 ? oiShareLeft : Number(rand(8, Math.min(35, oiShareLeft - 5)).toFixed(1));
+    oiShareLeft = Number((oiShareLeft - share).toFixed(1));
+    const exOi = oi * (share / 100);
+    const chg1h = Number(rand(-6, 8).toFixed(2));
+    return {
+      exchange: ex,
+      oi: exOi,
+      oiDisplay: formatUsd(exOi),
+      share,
+      change1h: chg1h,
+      change1hDisplay: formatPct(chg1h),
+    };
+  }).sort((a, b) => b.share - a.share);
+
+  return {
+    symbol: meta.symbol,
+    pair: `${meta.symbol}/USDT`,
+    name: meta.name,
+    category: meta.category,
+    region: meta.region,
+    instrument: '永续',
+    price,
+    change24h,
+    change24hDisplay: formatPct(change24h),
+    stats: {
+      oi,
+      oiDisplay: formatUsd(oi),
+      oiDelta24h,
+      oiDelta24hDisplay: formatUsd(oiDelta24h),
+      oiDelta24hPct: Number(((oiDelta24h / oi) * 100).toFixed(2)),
+      perpVolume: perpVol,
+      perpVolumeDisplay: formatUsd(perpVol),
+      spotVolume: spotVol,
+      spotVolumeDisplay: formatUsd(spotVol),
+      funding,
+      fundingDisplay: `${funding >= 0 ? '+' : ''}${funding.toFixed(4)}%`,
+      basis,
+      basisDisplay: formatPct(basis),
+      spotNetFlow: Math.round(spotVol * rand(-0.2, 0.25)),
+      futuresNetFlow: Math.round(perpVol * rand(-0.15, 0.2)),
+    },
+    chart: {
+      perp: sparkline(36, price),
+      spot: sparkline(36, price * (1 + rand(-0.002, 0.002))),
+      timeframes: ['5m', '15m', '1h', '4h', '1d'],
+    },
+    relativePerf: {
+      vsBtc: formatPct(rand(-8, 10)),
+      vsEth: formatPct(rand(-6, 8)),
+      vsSector: formatPct(rand(-5, 7)),
+    },
+    liquidationMap: {
+      note: '清算热力图占位（演示数据）',
+      longLiq: formatUsd(meta.baseOi * rand(0.001, 0.02)),
+      shortLiq: formatUsd(meta.baseOi * rand(0.001, 0.02)),
+      buckets: Array.from({ length: 8 }, (_, i) => ({
+        price: Number((price * (0.92 + i * 0.02)).toPrecision(price >= 1 ? 5 : 4)),
+        long: Math.round(rand(1e5, 8e6)),
+        short: Math.round(rand(1e5, 8e6)),
+      })),
+    },
+    layers: {
+      openInterest: { value: formatUsd(oi), delta: formatUsd(oiDelta24h) },
+      spotNetFlow: { value: formatUsd(Math.round(spotVol * rand(-0.2, 0.25))) },
+      futuresNetFlow: { value: formatUsd(Math.round(perpVol * rand(-0.15, 0.2))) },
+      fundingRate: { value: `${funding >= 0 ? '+' : ''}${funding.toFixed(4)}%` },
+      basis: { value: formatPct(basis) },
+    },
+    lsRatios: EXCHANGES.slice(0, 4).map((ex) => ({
+      exchange: ex,
+      long: Number(rand(40, 62).toFixed(1)),
+      short: Number(rand(38, 60).toFixed(1)),
+    })),
+    oiByExchange,
+    anomalies: relatedAnomalies,
+    hotRanks: relatedRanks,
+    updatedAt: Date.now(),
+  };
+}
+
+seedAnomalies();
+rebuildHotBoards();
+rebuildOverview();
+
+// Age + timeLabel refresh (minute stamps); in-place drift separately
+setInterval(() => {
+  const now = Date.now();
+  for (const a of anomalies) {
+    a.ageSec = Math.max(0, Math.floor((now - a.ts) / 1000));
+    a.timeLabel = hhmm(a.ts);
+  }
+  overview.updatedAt = now;
+}, 30000);
+
+setInterval(() => {
+  driftAnomalies();
+  rebuildOverview();
+}, DRIFT_MS);
+
+function scheduleNewCard() {
+  const delay = Math.floor(rand(NEW_CARD_MIN_MS, NEW_CARD_MAX_MS));
+  setTimeout(() => {
+    if (Math.random() < 0.55) {
+      anomalies.unshift(makeAnomaly(true, null, Math.floor(rand(5, 40))));
+      while (anomalies.length > TARGET_FEED) anomalies.pop();
+      rebuildOverview();
+    }
+    scheduleNewCard();
+  }, delay);
+}
+scheduleNewCard();
+
+setInterval(() => rebuildHotBoards(), BOARD_REFRESH_MS);
+setInterval(() => {
+  gentleJitterBoards();
+  rebuildOverview();
+}, BOARD_JITTER_MS);
+
+const coins = SYMBOL_POOL.slice(0, 16).map((m) => ({
+  id: m.symbol,
+  name: m.name,
+  price: m.basePrice,
+  vol24h: formatUsd(m.baseOi * rand(0.3, 1.1)),
+  change: Number(rand(-5, 6).toFixed(2)),
+  category: m.category,
+}));
+
+const corsOrigins = (
+  process.env.CORS_ORIGINS ||
+  'http://localhost:3000,http://127.0.0.1:3000,https://smart.b.ezcoin.ink,http://smart.b.ezcoin.ink'
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(cors({ origin: corsOrigins, credentials: true }));
+app.use(express.json());
+
+function vipFromToken(req, _res, next) {
+  req.vip = false;
+  req.user = null;
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token) return next();
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    req.vip = Boolean(decoded.vip);
+  } catch (_err) {
+    req.vip = false;
+  }
+  return next();
+}
+app.use(vipFromToken);
+
+app.get('/', (_req, res) => {
+  res.json({
+    message: 'EzRadar API',
+    status: 'online',
+    product: 'OI 异动雷达（演示数据）',
+    vipRequired: VIP_REQUIRED,
+    pollHintMs: POLL_HINT_MS,
+  });
+});
+
+app.get('/api/v1/config', (_req, res) => {
+  res.json({
+    vipRequired: VIP_REQUIRED,
+    pollHintMs: POLL_HINT_MS,
+    boardWindows: BOARD_WINDOWS,
+    boardKinds: BOARD_KINDS.map((k) => ({ key: k.key, title: k.title })),
+  });
+});
+
+app.get('/api/v1/coins', (_req, res) => {
+  const live = coins.map((c) => ({
+    ...c,
+    price: Number((c.price * (1 + rand(-0.004, 0.004))).toPrecision(c.price >= 1 ? 6 : 4)),
+    change: Number((c.change + rand(-0.15, 0.15)).toFixed(2)),
+  }));
+  res.json({ coins: live });
+});
+
+app.get('/api/v1/coins/:symbol', (req, res) => {
+  const detail = buildCoinDetail(req.params.symbol);
+  if (!detail) return res.status(404).json({ error: '未找到该币种' });
+  return res.json({ coin: detail });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+  if (email === DEMO_USER.email && password === DEMO_USER.password) {
+    const token = jwt.sign({ email: DEMO_USER.email, vip: true }, JWT_SECRET, { expiresIn: '12h' });
+    return res.json({ token, vip: true, email: DEMO_USER.email });
+  }
+  return res.status(400).json({ error: '账号或密码错误' });
+});
+
+app.get('/api/v1/me', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: '未授权' });
+  return res.json({ email: req.user.email, vip: req.vip, vipRequired: VIP_REQUIRED });
+});
+
+app.get('/api/v1/oi-moves', (req, res) => {
+  const vip = effectiveVip(req);
+  const direction = ['all', 'up', 'down'].includes(req.query.direction) ? req.query.direction : 'all';
+  let rows = anomalies
+    .filter((a) => a.eventKind === 'oi')
+    .map((a) => ({
+      id: a.id,
+      symbol: a.symbol,
+      name: a.name,
+      category: a.category,
+      interval: a.window,
+      price: a.price,
+      change24h: a.pricePct,
+      oiDeltaAbs: a.oiDeltaAbs,
+      oiDeltaAbsDisplay: a.oiDeltaAbsDisplay,
+      oiDeltaPct: a.oiDeltaPct,
+      intensity: Math.abs(a.oiDeltaPct) >= 8 ? 'strong' : Math.abs(a.oiDeltaPct) >= 3 ? 'medium' : 'weak',
+      intensityLabel: Math.abs(a.oiDeltaPct) >= 8 ? '强' : Math.abs(a.oiDeltaPct) >= 3 ? '中' : '弱',
+      direction: a.event,
+      directionLabel: a.eventLabel,
+      directionSide: a.side,
+      ageSec: a.ageSec,
+      timeLabel: a.timeLabel,
+      ts: a.ts,
+    }));
+  if (direction === 'up') rows = rows.filter((r) => r.oiDeltaPct > 0);
+  if (direction === 'down') rows = rows.filter((r) => r.oiDeltaPct < 0);
+  if (vip) {
+    return res.json({
+      meta: { vip: true, vipRequired: VIP_REQUIRED, total: rows.length, generatedAt: Date.now() },
+      moves: rows,
+    });
+  }
+  const preview = rows.slice(0, 8).map((row, i) =>
+    i < 3
+      ? { ...row, locked: false }
+      : { ...row, locked: true, price: null, oiDeltaAbsDisplay: '••••', oiDeltaPct: null, name: '••••', directionLabel: '•••' },
+  );
+  return res.json({
+    meta: { vip: false, vipRequired: VIP_REQUIRED, locked: true, total: rows.length, previewTotal: preview.length, generatedAt: Date.now() },
+    moves: preview,
+  });
+});
+
+app.get('/api/v1/anomalies', (req, res) => {
+  const vip = effectiveVip(req);
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toUpperCase() : '';
+  const kind = typeof req.query.kind === 'string' ? req.query.kind : 'all';
+  let rows = [...anomalies];
+  if (q) rows = rows.filter((a) => a.symbol.includes(q) || a.name.toUpperCase().includes(q));
+  if (kind === 'oi') rows = rows.filter((a) => a.eventKind === 'oi');
+  if (kind === 'price') rows = rows.filter((a) => a.eventKind === 'price');
+
+  const meta = {
+    vip,
+    vipRequired: VIP_REQUIRED,
+    live: true,
+    updatedAt: Date.now(),
+    tickMs: POLL_HINT_MS,
+    total: rows.length,
+  };
+
+  if (vip) return res.json({ meta: { ...meta, locked: false }, anomalies: rows });
+
+  const preview = rows.slice(0, 10).map((a, i) => {
+    if (i < 3) return { ...a, locked: false };
+    return {
+      ...a,
+      locked: true,
+      price: null,
+      pricePct: null,
+      oiDeltaAbs: null,
+      oiDeltaAbsDisplay: '••••',
+      oiDeltaPct: null,
+      lastLine: '近5分钟  ••••••',
+      chips: {},
+      name: '••••',
+    };
+  });
+  return res.json({
+    meta: { ...meta, locked: true, unlockHint: '登录 VIP 解锁完整异动流' },
+    anomalies: preview,
+  });
+});
+
+app.get('/api/v1/hot-boards', (req, res) => {
+  const vip = effectiveVip(req);
+  const window = BOARD_WINDOWS.includes(req.query.window) ? req.query.window : '15m';
+  const boards = hotBoards[window] || {};
+  const list = BOARD_KINDS.map((k) => boards[k.key]).filter(Boolean);
+  return res.json({
+    meta: {
+      window,
+      windows: BOARD_WINDOWS,
+      vip,
+      vipRequired: VIP_REQUIRED,
+      updatedAt: boardsUpdatedAt,
+    },
+    boards: list,
+  });
+});
+
+app.get('/api/v1/overview', (req, res) => {
+  const vip = effectiveVip(req);
+  const payload = { ...overview, vip, vipRequired: VIP_REQUIRED };
+  if (!vip) {
+    payload.oiNetChangeDisplay = '••••';
+    payload.oiNetChange = null;
+    if (payload.market) {
+      payload.market = {
+        ...payload.market,
+        perpNetInflowDisplay: '••••',
+        spotNetInflowDisplay: '••••',
+        oiNetChangeDisplay: '••••',
+        breadthDisplay: '••••',
+      };
+    }
+    payload.marketRows = (payload.marketRows || []).map((r, i) =>
+      i < 1 ? r : { ...r, value: '••••', vsPrior: '••••' },
+    );
+    payload.confluenceList = (payload.confluenceList || []).map((r, i) =>
+      i < 2 ? r : { ...r, symbol: '••••', flow: '••' },
+    );
+    payload.intensityList = (payload.intensityList || []).map((r, i) =>
+      i < 2 ? r : { ...r, symbol: '••••', flow: '••', intensity: '••' },
+    );
+  }
+  return res.json({ overview: payload });
+});
+
+app.get('/api/v1/rankings', (req, res) => {
+  const vip = effectiveVip(req);
+  if (!vip) return res.status(403).json({ error: '需要 VIP' });
+  const board = hotBoards['15m']?.oi_up_value;
+  const rankings = (board?.rows || []).slice(0, 10).map((r, i) => ({
+    rank: i + 1,
+    id: r.symbol,
+    name: r.name,
+    score: r.strength,
+    flow: r.side === 'up' ? 'in' : 'out',
+    mentions: Math.round(Math.abs(r.value) / 1e5),
+  }));
+  return res.json({ rankings });
+});
+
+app.listen(PORT, () => {
+  console.log(`EzRadar API listening on :${PORT} (VIP_REQUIRED=${VIP_REQUIRED})`);
+});
