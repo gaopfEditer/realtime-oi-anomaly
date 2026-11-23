@@ -7,6 +7,7 @@ const DEMO_EMAIL = '';
 const DEMO_PASSWORD = '';
 const TABS = [
   { id: 'radar', label: '雷达' },
+  { id: 'watch', label: '观察池' },
   { id: 'global', label: '全球' },
   { id: 'macro', label: '宏观' },
   { id: 'fund', label: '资金' },
@@ -53,6 +54,21 @@ function formatChange(value) {
   if (value == null) return '••••';
   const sign = value > 0 ? '+' : '';
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function signedPct(value, digits = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const v = Number(value);
+  return `${v > 0 ? '+' : ''}${v.toFixed(digits)}%`;
+}
+
+function remainText(sec) {
+  const v = Math.max(0, Number(sec) || 0);
+  if (v <= 0) return '已到期';
+  const h = Math.floor(v / 3600);
+  const m = Math.floor((v % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${Math.floor(v % 60)}s`;
 }
 
 function clock(ts) {
@@ -325,6 +341,250 @@ function OverviewCol({ overview }) {
   );
 }
 
+
+const WATCH_FILTERS = [
+  { id: 'active', label: '活跃' },
+  { id: 'setup', label: '构筑' },
+  { id: 'armed', label: '待触发' },
+  { id: 'triggered', label: '已触发' },
+  { id: 'invalid', label: '失效' },
+  { id: 'all', label: '全部' },
+];
+
+function WatchCard({ entry, active, onSelect }) {
+  const plan = entry.plan || {};
+  const side = plan.activeSide === 'short' ? 'short' : 'long';
+  const p = plan[side] || {};
+  const m = entry.metrics || {};
+  const warn = (entry.warnings || [])[0];
+  return (
+    <button
+      type="button"
+      className={`watch-card watch-stage-${entry.stage} ${active ? 'selected' : ''}`}
+      onClick={() => onSelect(entry.symbol)}
+      aria-pressed={active}
+    >
+      <div className="watch-card-head">
+        <span className={`watch-stage ${entry.stage}`}>{entry.stageLabel}</span>
+        <span className="watch-sym">{entry.symbol}</span>
+        <span className={`watch-bias ${entry.bias}`}>{entry.biasLabel}</span>
+        <span className="grow" />
+        <span className={`watch-grade ${entry.grade}`}>{entry.grade}</span>
+        <span className="watch-score">{entry.score}</span>
+      </div>
+      <div className="watch-card-mid">
+        <span className="watch-price">{formatPrice(m.price)}</span>
+        <span className={m.priceSinceDetectPct >= 0 ? 'up' : 'down'}>{signedPct(m.priceSinceDetectPct)}</span>
+        <span className="muted">侦测后</span>
+        <span className="grow" />
+        <span className="watch-oi">OI 保留 <b>{m.oiRetentionPct}%</b></span>
+      </div>
+      <div className="watch-plan-line">
+        <span className={`watch-side-tag ${side}`}>{plan.activeSide === 'both' ? '双向' : p.sideLabel}</span>
+        <span>触发 <b>{formatPrice(p.trigger)}</b></span>
+        <span>止损 <b>{formatPrice(p.stop)}</b></span>
+        <span>T1 <b>{formatPrice(p.target1)}</b></span>
+        <span className="muted">RR {p.rr || 1.5}</span>
+      </div>
+      <div className="watch-tags">
+        <span>量比 {m.volumeRatio}x</span>
+        <span>FR {m.fundingDisplay}</span>
+        <span>箱体 {m.boxWidthAtr} ATR</span>
+        {warn ? <span className="watch-warn-inline" title={warn}>{warn}</span> : null}
+      </div>
+      {entry.triggered ? (
+        <div className={`watch-triggered-note ${entry.outcome?.status || 'running'}`}>
+          {entry.triggered.side === 'long' ? '多' : '空'}单已于 {clock(entry.triggered.at)} 触发 · {entry.outcome?.note || '持有观察'}
+        </div>
+      ) : null}
+    </button>
+  );
+}
+
+function WatchDetail({ entry, nowTs, onDismiss, dismissBusy }) {
+  if (!entry) {
+    return (
+      <aside className="watch-side watch-intro">
+        <h2>怎么用这个观察池</h2>
+        <p>OI 异动只说明杠杆在进场或离场，<b>不直接给方向</b>。入池后先等 5 分钟，再等 20 分钟箱体收敛，最后等放量突破触发位。</p>
+        <ol>
+          <li><b>刚侦测</b>：只记录，不追第一根。</li>
+          <li><b>确认中</b>：OI 没回吐、价格开始跟随。</li>
+          <li><b>构筑中</b>：箱体收紧，算多空两套触发/止损。</li>
+          <li><b>待触发</b>：价格靠近触发位，等放量。</li>
+          <li><b>已触发</b>：按计划执行；失效就看 OI 回吐与价格破坏。</li>
+        </ol>
+        <p className="wd-note">仓位建议：单笔风险 0.5%–1% 账户权益；山寨币滑点大，触发后优先等回踩，不追已经离开触发位 0.5 ATR 的价格。</p>
+      </aside>
+    );
+  }
+  const m = entry.metrics || {};
+  const plan = entry.plan || {};
+  const p = plan[entry.triggered?.side || (entry.bias === 'short' ? 'short' : 'long')] || plan.long || {};
+  return (
+    <aside className="watch-side">
+      <div className="wd-head">
+        <div className="wd-title">
+          <span className={`watch-stage ${entry.stage}`}>{entry.stageLabel}</span>
+          <div className="wd-sym-row">
+            <h2>{entry.symbol}</h2>
+            <span className={`watch-bias ${entry.bias}`}>{entry.biasLabel}</span>
+          </div>
+          <span className="wd-name">{entry.name} · {entry.category}</span>
+        </div>
+        <div className={`wd-score ${entry.grade}`}>
+          <b>{entry.score}</b>
+          <span>{entry.grade}</span>
+        </div>
+      </div>
+      <div className="wd-sub">
+        <span>侦测 {clock(entry.createdAt)}</span>
+        <span>已观察 {entry.ageMin} 分钟</span>
+        <span>剩余 {remainText(Math.floor((entry.expiresAt - nowTs) / 1000))}</span>
+      </div>
+
+      {entry.triggered ? (
+        <div className={`wd-triggered ${entry.outcome?.status || 'running'}`}>
+          <b>{entry.triggered.side === 'long' ? '多单' : '空单'}已触发</b>
+          <span>{clock(entry.triggered.at)} @ {formatPrice(entry.triggered.price)}</span>
+          <span>{entry.outcome?.note || '持有观察'} · 最大有利 {signedPct(entry.outcome?.favorablePct)} / 最大不利 {signedPct(entry.outcome?.adversePct)}</span>
+        </div>
+      ) : null}
+
+      <div className="wd-metrics">
+        <div className="wd-metric"><span>现价</span><b>{formatPrice(m.price)}</b><i className={m.priceSinceDetectPct >= 0 ? 'up' : 'down'}>{signedPct(m.priceSinceDetectPct)}</i></div>
+        <div className="wd-metric"><span>OI 保留</span><b>{m.oiRetentionPct}%</b><i>侦测后 {signedPct(m.oiSinceDetectPct)}</i></div>
+        <div className="wd-metric"><span>资金费率</span><b>{m.fundingDisplay}</b><i>拥挤度参考</i></div>
+        <div className="wd-metric"><span>量比</span><b>{m.volumeRatio}x</b><i>近 3 根 / 异动前</i></div>
+        <div className="wd-metric"><span>箱体</span><b>{formatPrice(m.boxLow)}–{formatPrice(m.boxHigh)}</b><i>{m.boxWidthAtr} ATR / {m.boxWidthPct}%</i></div>
+        <div className="wd-metric"><span>ATR</span><b>{m.atrPct}%</b><i>5m · 止损基准</i></div>
+        <div className="wd-metric"><span>VWAP</span><b>{formatPrice(m.vwap)}</b><i>现价偏离 {signedPct(m.vwapDistancePct)}</i></div>
+        <div className="wd-metric"><span>24h 成交额</span><b>{m.quoteVolumeDisplay}</b><i>BTC 15m {signedPct(m.btc15mPct)}</i></div>
+      </div>
+
+      <div className="wd-section">
+        <h3>双向入场计划 <span className="muted">触发后才执行，不提前埋伏</span></h3>
+        <div className="wd-plans">
+          {['long', 'short'].map((side) => {
+            const q = plan[side];
+            if (!q) return null;
+            const isActive = entry.triggered ? entry.triggered.side === side : plan.activeSide === side;
+            return (
+              <div key={side} className={`wd-plan ${side} ${isActive ? 'active' : ''} ${q.valid ? '' : 'invalid'}`}>
+                <div className="wd-plan-head">
+                  <b>{q.sideLabel}计划</b>
+                  <span>{q.valid ? '结构可用' : '暂不可用'}</span>
+                </div>
+                <div className="wd-levels">
+                  <span>触发 <b>{formatPrice(q.trigger)}</b></span>
+                  <span>止损 <b>{formatPrice(q.stop)}</b></span>
+                  <span>T1 <b>{formatPrice(q.target1)}</b></span>
+                  <span>T2 <b>{formatPrice(q.target2)}</b></span>
+                </div>
+                <div className="wd-plan-foot">
+                  RR {q.rr}/{q.rr2} · 止损距离 {q.stopPct}% · 距触发 {signedPct(q.triggerDistancePct)}
+                </div>
+                <div className="wd-plan-note">{q.note}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {(entry.reasons || []).length ? (
+        <div className="wd-section">
+          <h3>入池理由</h3>
+          <ul className="wd-list">
+            {entry.reasons.slice(0, 5).map((r) => <li key={r}>{r}</li>)}
+          </ul>
+        </div>
+      ) : null}
+
+      {(entry.warnings || []).length ? (
+        <div className="wd-section">
+          <h3>风险提示</h3>
+          <ul className="wd-list warn">
+            {entry.warnings.slice(0, 5).map((r) => <li key={r}>{r}</li>)}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="wd-section">
+        <h3>失效条件</h3>
+        <ul className="wd-check">
+          {(entry.invalidation || []).map((x) => (
+            <li key={x.key} className={x.ok ? 'ok' : 'bad'}>
+              <span>{x.ok ? '✓' : '✕'}</span>
+              <b>{x.label}</b>
+              <i>{x.detail}</i>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="wd-section">
+        <h3>阶段时间线</h3>
+        <ol className="wd-timeline">
+          {(entry.timeline || []).slice(-7).reverse().map((t, i) => (
+            <li key={`${t.ts}-${i}`}>
+              <span>{clock(t.ts)}</span>
+              <b>{t.label}</b>
+              <i>{t.note}</i>
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <div className="wd-actions">
+        <Link href={`/coin/${encodeURIComponent(entry.symbol)}`} className="btn ghost">币种详情</Link>
+        <button type="button" className="btn ghost danger" disabled={dismissBusy === entry.symbol} onClick={() => onDismiss(entry.symbol)}>
+          {dismissBusy === entry.symbol ? '…' : '移出观察池'}
+        </button>
+      </div>
+      <p className="wd-note">更新 {clockFull(entry.updatedAt)} · 数据 {entry.source} · 规则辅助，不构成投资建议</p>
+    </aside>
+  );
+}
+
+function WatchView({ entries, meta, err, loaded, stage, setStage, q, setQ, selected, onSelect, nowTs, onDismiss, dismissBusy }) {
+  const counts = meta?.counts || {};
+  const updated = meta?.generatedAt ? clock(meta.generatedAt) : '—';
+  return (
+    <main className="watch-page">
+      <div className="watch-top">
+        <div className="watch-summary">
+          <span><i className="dot active" />活跃 <b>{counts.active ?? 0}</b></span>
+          <span><i className="dot armed" />待触发 <b>{counts.armed ?? 0}</b></span>
+          <span><i className="dot hot" />已触发 <b>{counts.triggered ?? 0}</b></span>
+          <span><i className="dot bad" />失效 <b>{(counts.invalid ?? 0) + (counts.expired ?? 0)}</b></span>
+        </div>
+        <div className="seg watch-seg">
+          {WATCH_FILTERS.map((f) => (
+            <button key={f.id} type="button" className={stage === f.id ? 'active' : ''} onClick={() => setStage(f.id)}>{f.label}</button>
+          ))}
+        </div>
+        <input className="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索币种" aria-label="搜索观察池" />
+        <span className="muted watch-updated">更新 {updated} · {meta?.tickMs ? `${Math.round(meta.tickMs / 1000)}s` : '—'}</span>
+      </div>
+      {err ? <div className="err">{err}</div> : null}
+      <div className="watch-body">
+        <div className="watch-list">
+          {entries.map((e) => (
+            <WatchCard key={`${e.symbol}-${e.id}`} entry={e} active={selected === e.symbol} onSelect={onSelect} />
+          ))}
+          {!entries.length ? (
+            <div className="watch-empty">
+              <h3>{loaded ? '暂无观察中的币种' : '加载中…'}</h3>
+              <p>OI 异动出现后会自动入池。若雷达暂时没有大额异动，这里保持为空是正常的，不硬推。</p>
+            </div>
+          ) : null}
+        </div>
+        <WatchDetail entry={selected} nowTs={nowTs} onDismiss={onDismiss} dismissBusy={dismissBusy} />
+      </div>
+    </main>
+  );
+}
+
 export default function HomePage() {
   const initialTab = useMemo(() => {
     if (typeof window === 'undefined') return 'radar';
@@ -356,6 +616,16 @@ export default function HomePage() {
 
   const [coins, setCoins] = useState([]);
   const [coinsErr, setCoinsErr] = useState('');
+
+  const [watchStage, setWatchStage] = useState('active');
+  const [watchQ, setWatchQ] = useState('');
+  const [watch, setWatch] = useState([]);
+  const [watchMeta, setWatchMeta] = useState(null);
+  const [watchErr, setWatchErr] = useState('');
+  const [watchLoaded, setWatchLoaded] = useState(false);
+  const [watchSel, setWatchSel] = useState('');
+  const [dismissBusy, setDismissBusy] = useState('');
+  const watchReqRef = useRef(0);
 
   const authHeader = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : {}),
@@ -390,6 +660,27 @@ export default function HomePage() {
       window.history.replaceState({}, '', url);
     }
   }, []);
+
+  const loadWatch = useCallback(async () => {
+    const reqId = watchReqRef.current + 1;
+    watchReqRef.current = reqId;
+    try {
+      const qs = new URLSearchParams({ stage: watchStage });
+      if (watchQ.trim()) qs.set('q', watchQ.trim());
+      const res = await fetch(`/api/v1/watchlist?${qs}`, { headers: authHeader });
+      const body = await res.json();
+      if (watchReqRef.current !== reqId) return;
+      if (!res.ok) throw new Error(body.error || `watchlist ${res.status}`);
+      setWatch(Array.isArray(body.entries) ? body.entries : []);
+      setWatchMeta(body.meta || null);
+      setWatchErr('');
+    } catch (err) {
+      if (watchReqRef.current !== reqId) return;
+      setWatchErr(err.message || '观察池加载失败');
+    } finally {
+      if (watchReqRef.current === reqId) setWatchLoaded(true);
+    }
+  }, [authHeader, watchQ, watchStage]);
 
   const loadRadar = useCallback(async () => {
     try {
@@ -430,6 +721,21 @@ export default function HomePage() {
       clearInterval(id);
     };
   }, [tab, loadRadar, pollMs]);
+
+  useEffect(() => {
+    if (tab !== 'watch') return undefined;
+    let cancelled = false;
+    async function tick() {
+      if (!cancelled) await loadWatch();
+    }
+    tick();
+    const id = setInterval(tick, pollMs);
+    return () => {
+      cancelled = true;
+      watchReqRef.current += 1;
+      clearInterval(id);
+    };
+  }, [tab, loadWatch, pollMs]);
 
   useEffect(() => {
     if (tab !== 'global') return undefined;
@@ -475,12 +781,35 @@ export default function HomePage() {
     }
   }
 
+  async function handleDismissWatch(symbol) {
+    setDismissBusy(symbol);
+    try {
+      const res = await fetch(`/api/v1/watchlist/${encodeURIComponent(symbol)}/dismiss`, {
+        method: 'POST',
+        headers: authHeader,
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `dismiss ${res.status}`);
+      if (watchSel === symbol) setWatchSel('');
+      await loadWatch();
+      setWatchErr('');
+    } catch (err) {
+      setWatchErr(err.message || '移出失败');
+    } finally {
+      setDismissBusy('');
+    }
+  }
+
   function handleLogout() {
     setToken('');
     setLoginError('');
   }
 
   const showLock = vipRequired && !token;
+  const selectedWatch = useMemo(
+    () => watch.find((e) => e.symbol === watchSel) || null,
+    [watch, watchSel],
+  );
 
   return (
     <div className="app">
@@ -532,6 +861,24 @@ export default function HomePage() {
             <OverviewCol overview={overview} />
           </div>
         </>
+      ) : null}
+
+      {tab === 'watch' ? (
+        <WatchView
+          entries={watch}
+          meta={watchMeta}
+          err={watchErr}
+          loaded={watchLoaded}
+          stage={watchStage}
+          setStage={setWatchStage}
+          q={watchQ}
+          setQ={setWatchQ}
+          selected={selectedWatch}
+          onSelect={setWatchSel}
+          nowTs={nowTs}
+          onDismiss={handleDismissWatch}
+          dismissBusy={dismissBusy}
+        />
       ) : null}
 
       {tab === 'global' ? (

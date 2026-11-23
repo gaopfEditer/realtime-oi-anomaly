@@ -1,113 +1,125 @@
-# 本地行情监控脚手架
- 
-这是一个**本地学习用**的加密行情监控最小实现：Express API + Next.js 前端 + 内存假数据。它只借鉴「公开列表 + VIP 榜单」这个产品形状，**不会抓取、镜像或对接任何第三方线上站点**。
+# EzRadar — 本地加密 OI 异动监控台
 
-Postgres / Redis / Docker 都是可选的。默认路径只用 npm。
+本地运行的真实数据监控台：Express API + Next.js 前端，数据来自 Binance 公开合约接口（U 本位永续）。核心链路是 **OI / 价格异动扫描 → 热榜 → 异动后观察池 → 双向入场计划**，用于复盘和研究，不构成投资建议。
 
-## 本地运行（推荐）
+## 快速启动
 
-需要 Node.js 18+。
+需要 Node.js 18+（当前验证环境 Node 22）。
 
-```bash
-cp .env.example .env   # 可选；不复制时 API 使用内置开发密钥
+```powershell
 npm run setup
 npm run dev:api
 ```
 
 另开一个终端：
 
-```bash
+```powershell
 npm run dev:frontend
 ```
 
-- API：http://localhost:3001
-- 前端：http://localhost:3000
+- API（本地 dev）：`http://localhost:3101`（`npm run dev:api` 固定 `PORT=3101`，避免与常见占用 3001 的其他 dev 服务冲突）
+- 前端：`http://localhost:3000`
+- 若 3000 被其他项目占用：`npm run dev:frontend:alt`（**3002**），或直接 `cd frontend; npm run dev:alt`
 
-前端通过 Next.js rewrite 把浏览器里的 `/api/*` 转到 `NEXT_PUBLIC_API_URL`（默认 `http://localhost:3001`）。一般不用改。若 API 不在 3001：
+前端通过 Next.js rewrite 把浏览器里的 `/api/*` 转到 `NEXT_PUBLIC_API_URL`（本地默认 `http://localhost:3101`）。Docker / 生产仍为容器内 `3001`。
 
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:3001 npm run dev:frontend
+自定义 API 端口时同步设置：
+
+```powershell
+$env:PORT='3101'; npm run dev --prefix api
+$env:NEXT_PUBLIC_API_URL='http://localhost:3101'; npm run dev:frontend
 ```
 
-## 演示账号
+## 功能
 
-| 字段 | 值 |
-|------|----|
-| 邮箱 | `demo@local.dev` |
-| 密码 | `demo123` |
-| 权限 | 登录后签发 VIP JWT |
+### 雷达（Radar）
+- 实时异动流：价格急涨/急跌、OI 急增/急减，5 分钟桶去重，按幅度排序。
+- 三列工作台：异动流 / 热榜（全球、宏观、资金三组榜单）/ 币种速览。
+- 每个异动带时间、窗口涨跌幅、OI 变化额、估算主动买卖流、交易所分布。
 
-## 验证
+### 观察池（Watchlist）
+OI 异动只说明杠杆在进场/离场，**不直接说明方向**。观察池把“异动事件”变成一条可跟踪的状态机：
 
-API 起来之后：
+`刚侦测 → 确认中 → 构筑中 → 待触发 → 已触发 / 已失效 / 已过期`
 
-```bash
-curl -s http://localhost:3001/
-curl -s http://localhost:3001/api/v1/coins
-curl -s -o /tmp/rankings.json -w "%{http_code}\n" http://localhost:3001/api/v1/rankings
-curl -s -X POST http://localhost:3001/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"demo@local.dev","password":"demo123"}'
-```
+每个币种给出：
+- 阶段、0–100 评分与 A/B/C 分级；
+- OI 结构保留比例、箱体上下沿、ATR、VWAP 偏离、资金费率、量比、24h 成交额；
+- 多空两套计划：触发位、止损、T1（1.5R）、T2（2.5R）、止损距离、是否已离开触发位；
+- 失效条件清单（OI 回吐、价格破坏、超时、触发后止损）；
+- 阶段时间线与触发后的 MFE/MAE 跟踪；
+- 一键移出观察池。
 
-带 token 看榜单（把 `TOKEN` 换成登录返回值）：
+规则细节见 [WATCHLIST_STRATEGY.md](./WATCHLIST_STRATEGY.md)。
 
-```bash
-curl -s http://localhost:3001/api/v1/rankings -H "Authorization: Bearer TOKEN"
-```
-
-或一次跑完：
-
-```bash
-npm run verify
-```
-
-期望：
-
-- `GET /` → `{ "message": "Mercu Clone API", "status": "online" }`
-- `GET /api/v1/coins` → `{ "coins": [ ... ] }`
-- `GET /api/v1/rankings` 无 token → `403 { "error": "VIP required" }`
-- `POST /api/auth/login` 演示账号 → `{ "token", "vip": true, "email" }`
-- 同上，带 `Authorization: Bearer <token>` → `{ "rankings": [ ... ] }`
+### 币种详情
+`/coin/[symbol]`：OI 序列、5m K 线、VWAP、资金费率、多空比、清算分布、分交易所 OI。
 
 ## API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/` | 健康检查 |
-| GET | `/api/v1/coins` | 公开假币种列表 |
-| POST | `/api/auth/login` | 演示登录，返回 VIP JWT |
-| GET | `/api/v1/rankings` | VIP 假榜单；否则 403 |
+| GET | `/` | 健康检查，含数据源、币种数、观察池活跃数 |
+| GET | `/api/v1/overview` | 市场总览 |
+| GET | `/api/v1/anomalies` | 异动流（支持窗口/类型/搜索） |
+| GET | `/api/v1/oi-moves` | OI 异动专用流 |
+| GET | `/api/v1/hot-boards` | 热榜（全球 / 宏观 / 资金） |
+| GET | `/api/v1/rankings` | VIP 榜单（`VIP_REQUIRED=true` 时需 token） |
+| GET | `/api/v1/coins` | 币种列表 |
+| GET | `/api/v1/coins/:symbol` | 币种详情 |
+| GET | `/api/v1/watchlist?stage=&q=&limit=` | 观察池列表；`stage=active/all/detected/...` |
+| GET | `/api/v1/watchlist/:symbol` | 单个观察条目 |
+| POST | `/api/v1/watchlist/:symbol/dismiss` | 手动移出观察池 |
+| POST | `/api/auth/login` | 演示登录 |
+| GET | `/api/v1/config` | 前端配置（轮询、榜单窗口、观察池阶段） |
 
-JWT 密钥只读 `JWT_SECRET`，见 `.env.example`。未设置时使用 `dev-secret-change-me`。中间件解析 `Authorization: Bearer`，并把 `req.vip` 设成 token 里的 `vip` 声明。
+`VIP_REQUIRED=false`（默认）时全部开放；设为 `true` 时非 VIP 的观察池只返回前 3 条。
 
-## 可选 Postgres
+## 数据与运行机制
 
-API **不会**在 Phase 1 连库。`database/init.sql` 只是合法 schema + 种子，给你以后接库用：
+- 数据源：Binance Futures 公开接口（ticker、5m/1h/4h/1d OI、5m K 线、资金费率、多空比、清算等）。网络不可用时降级到内置演示数据，前端会显示 `dataSource`。
+- 轮询：ticker 8s、OI/K 线 40s、榜单与观察池 20s；前端轮询 10s。
+- 观察池持久化：`api/data/watchlist.json`，每 60s 落盘，重启后恢复 6 小时内未过期条目。
+- 配置：复制 `.env.example` 为 `.env` 可选；`JWT_SECRET`、`VIP_REQUIRED`，以及可选的 `WATCH_STORE_PATH`。
+- 若健康检查返回 `dataSource=seed`，说明本机访问 `fapi.binance.com` 失败（常见于网络限制）。启动前设置可达的镜像/代理地址：`$env:BINANCE_FAPI='https://your-mirror.example.com'`。服务会先启动、后台重试，不会因为数据源不可达而打不开。
 
-```bash
-createdb mercu_clone
-psql -d mercu_clone -f database/init.sql
+## 验证
+
+```powershell
+# 观察池引擎单测（合成 K 线/OI，不依赖网络）
+npm run test:watch
+
+# 接口自检（API 已启动）
+npm run verify
+
+Invoke-RestMethod http://localhost:3101/ | ConvertTo-Json -Compress
+Invoke-RestMethod "http://localhost:3101/api/v1/watchlist?stage=active" | ConvertTo-Json -Depth 6
 ```
 
-## 可选 Docker
+前端构建：
 
-`docker-compose.yml` 已补上 Redis，并为 `api` / `frontend` 加了 Dockerfile。本地开发请优先用上面的 npm 命令。Compose 仅在你明确要容器时使用：
-
-```bash
-docker compose up --build
+```powershell
+cd frontend
+npm run build
 ```
 
 ## 目录
 
 ```
-api/src/index.js      Express + JWT + 内存数据
-frontend/app/         Next.js App Router 页面
-database/init.sql     可选 Postgres
-scripts/verify.js     接口自检
-MVP_GAP.md            需求草图 vs 本仓库实现
+api/src/index.js          Express、数据源、异动扫描、热榜、币种详情、路由
+api/src/watchlist.js      异动后观察引擎（阶段机/评分/双向计划/失效/持久化）
+api/data/                 观察池落盘（运行时生成）
+frontend/app/page.jsx     雷达 / 观察池 / 全球 页面
+frontend/app/coin/        币种详情
+frontend/app/globals.css  暗色主题与全部布局
+scripts/test-watchlist.js 观察引擎单测
+scripts/verify.js         接口自检
+WATCHLIST_STRATEGY.md     观察与入场策略说明
 ```
 
-## 修复归档
+## 已知边界
 
-干净副本：`artifacts/mercu-clone-full-fixed.tar.gz`。
+- 观察池基于 5m K 线与 40s OI 轮询，**不是逐笔/逐档数据**；小市值币种的插针、滑点和假突破无法只靠这些数据完全过滤。
+- 资金费率、多空比、清算数据来自公共接口，存在延迟；极端行情下接口可能限流。
+- 评分用于排序和“值不值得继续看”，不是胜率预测。
+- 本项目仅用于本地研究与技术学习，不提供任何投资建议。

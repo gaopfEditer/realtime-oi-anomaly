@@ -1,4 +1,4 @@
-const API = process.env.API_URL || 'http://localhost:3001';
+const API = process.env.API_URL || 'http://localhost:3101';
 
 async function request(path, options = {}) {
   const res = await fetch(`${API}${path}`, options);
@@ -16,11 +16,23 @@ async function main() {
   const health = await request('/');
   assert(health.status === 200 && health.body.status === 'online', `health failed: ${JSON.stringify(health)}`);
 
+  const cfg = await request('/api/v1/config');
+  assert(cfg.status === 200 && cfg.body.watch, `config failed: ${JSON.stringify(cfg)}`);
+  assert(Array.isArray(cfg.body.watch.stages) && cfg.body.watch.stages.length === 8, 'watch stages missing');
+
   const coins = await request('/api/v1/coins');
   assert(coins.status === 200 && Array.isArray(coins.body.coins) && coins.body.coins.length > 0, `coins failed: ${JSON.stringify(coins)}`);
 
-  const locked = await request('/api/v1/rankings');
-  assert(locked.status === 403 && locked.body.error === 'VIP required', `rankings without token should be 403: ${JSON.stringify(locked)}`);
+  const rankings = await request('/api/v1/rankings');
+  if (cfg.body.vipRequired) {
+    assert(rankings.status === 403, `rankings without token should be 403: ${JSON.stringify(rankings)}`);
+  } else {
+    assert(rankings.status === 200 && Array.isArray(rankings.body.rankings), `rankings failed: ${JSON.stringify(rankings)}`);
+  }
+
+  const watch = await request('/api/v1/watchlist?stage=active');
+  assert(watch.status === 200 && Array.isArray(watch.body.entries), `watchlist failed: ${JSON.stringify(watch)}`);
+  assert(watch.body.meta && watch.body.meta.tickMs > 0 && watch.body.meta.ttlHours === 6, 'watchlist meta failed');
 
   const badLogin = await request('/api/auth/login', {
     method: 'POST',
@@ -44,9 +56,16 @@ async function main() {
   console.log('verify ok');
   console.log(JSON.stringify({
     health: health.body,
+    dataSource: health.body.dataSource,
     coins: coins.body.coins.map((c) => c.id),
-    rankingsLocked: locked.body,
+    vipRequired: cfg.body.vipRequired,
     rankings: vip.body.rankings.map((r) => r.id),
+    watch: {
+      active: watch.body.meta.counts.active,
+      stages: cfg.body.watch.stages.map((s) => s.key),
+      tickMs: cfg.body.watch.tickMs,
+      ttlHours: cfg.body.watch.ttlHours,
+    },
   }, null, 2));
 }
 

@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
+const { createWatchlist } = require('./watchlist');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -164,7 +167,10 @@ const WINDOW_TO_PERIOD = {
 const POLL_HINT_MS = 10000;
 const TICKER_TTL_MS = 8000;
 const OI_POLL_MS = 40000;
-const BOARD_REFRESH_MS = 20000; // boards recompute ~20s (was 45s)
+const BOARD_REFRESH_MS = 20000;
+const WATCH_TICK_MS = 20000; // 观察池阶段机更新频率
+const WATCH_TTL_MS = 6 * 60 * 60 * 1000; // 异动后最多观察 6 小时
+const WATCH_STORE_PATH = process.env.WATCH_STORE_PATH || path.join(__dirname, '..', 'data', 'watchlist.json'); // boards recompute ~20s (was 45s)
 const TARGET_FEED = 100; // denser feed (~mercu anomaly-v4 size)
 const BOARD_VALUE_N = 7;
 const BOARD_STR_N = 8;
@@ -383,7 +389,49 @@ const seenAnomalyKeys = new Set(); // dedupe key: symbol|kind|bucketTs
 const coinEnrichCache = new Map(); // symbol → { at, data }
 const COIN_ENRICH_TTL_MS = 30000;
 
-async function fetchJson(url, { timeoutMs = 12000 } = {}) {
+/**
+ * 异动后观察池：OI 异动自动入池，阶段机 + 双向入场计划 + 失效条件。
+ * 纯内存运行；每 60s 落盘一次，重启后可恢复 6 小时内的观察。
+ */
+const watchlist = createWatchlist({ ttlMs: WATCH_TTL_MS });
+let lastWatchSaveAt = 0;
+
+function loadWatchStore() {
+  try {
+    if (!fs.existsSync(WATCH_STORE_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(WATCH_STORE_PATH, 'utf8'));
+    const out = watchlist.restore(raw);
+    if (out.restored > 0) console.log(`[watch] restored ${out.restored} entries from ${WATCH_STORE_PATH}`);
+  } catch (err) {
+    console.warn('[watch] restore failed:', err.message);
+  }
+}
+
+function saveWatchStore(force = false) {
+  const now = Date.now();
+  if (!force && now - lastWatchSaveAt < 60000) return;
+  lastWatchSaveAt = now;
+  try {
+    fs.mkdirSync(path.dirname(WATCH_STORE_PATH), { recursive: true });
+    fs.writeFileSync(WATCH_STORE_PATH, JSON.stringify(watchlist.dump()), 'utf8');
+  } catch (err) {
+    console.warn('[watch] save failed:', err.message);
+  }
+}
+
+// Binance 在部分地区/网络下不可达：连续失败后短路一段时间，避免启动被上百个超时拖死
+let binanceCooldownUntil = 0;
+let binanceFailStreak = 0;
+const BINANCE_FAIL_LIMIT = 3;
+const BINANCE_COOLDOWN_MS = 45000;
+
+function binanceCoolingDown() {
+  return Date.now() < binanceCooldownUntil;
+}
+
+async function fetchJson(url, { timeoutMs = 8000 } = {}) {
+  const isFapi = String(url).startsWith(FAPI);
+  if (isFapi && binanceCoolingDown()) throw new Error('binance cooldown');
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -392,7 +440,20 @@ async function fetchJson(url, { timeoutMs = 12000 } = {}) {
       headers: { Accept: 'application/json', 'User-Agent': 'EzRadar/1.0' },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+    if (isFapi) binanceFailStreak = 0;
     return await res.json();
+  } catch (err) {
+    const networkish = err && (
+      err.name === 'AbortError'
+      || err instanceof TypeError
+      || /fetch failed|ENOTFOUND|ECONN|ETIMEDOUT|socket|network/i.test(err.message || '')
+      || /^HTTP (403|451|5\d\d)/.test(err.message || '')
+    );
+    if (isFapi && networkish) {
+      binanceFailStreak += 1;
+      if (binanceFailStreak >= BINANCE_FAIL_LIMIT) binanceCooldownUntil = Date.now() + BINANCE_COOLDOWN_MS;
+    }
+    throw err;
   } finally {
     clearTimeout(t);
   }
@@ -560,6 +621,10 @@ function scanLivePriceAnomalies() {
 async function refreshTickers() {
   const now = Date.now();
   if (now - lastTickerAt < TICKER_TTL_MS) return;
+  if (binanceCoolingDown()) {
+    if (market.size === 0) seedFallbackUniverse();
+    return;
+  }
   try {
     const [tickers, premiums] = await Promise.all([
       fetchJson(`${FAPI}/fapi/v1/ticker/24hr`),
@@ -751,6 +816,7 @@ function computeWindowMetrics(row) {
 async function refreshOiAndKlines() {
   const now = Date.now();
   if (now - lastOiPollAt < OI_POLL_MS - 2000 && lastOiPollAt > 0) return;
+  if (binanceCoolingDown()) return;
   const metas = activeMetas().filter((m) => market.has(m.symbol));
   if (!metas.length) {
     for (const m of CURATED) ensureMarketRow(m);
@@ -1376,6 +1442,14 @@ function pushAnomaly(partial) {
   a.lastLine = buildLastLine(a);
   anomalies.unshift(a);
   if (anomalies.length > TARGET_FEED) trimAnomaliesToTarget();
+  // OI 异动自动进入观察池；价格异动只进异动流，不单独开观察
+  if (a.eventKind === 'oi') {
+    try {
+      watchlist.register(a, market.get(a.symbol), market.get('BTC'));
+    } catch (err) {
+      console.warn('[watch] register failed:', err.message);
+    }
+  }
   return true;
 }
 
@@ -2668,6 +2742,7 @@ async function bootstrap() {
   seenAnomalyKeys.clear();
   anomalySeq = 1;
   summaryPrevSnap = null;
+  loadWatchStore();
   seedFallbackUniverse();
   try {
     await refreshTickers();
@@ -2680,7 +2755,9 @@ async function bootstrap() {
       if (row) a.chips = makeChips(row, EVENT_TYPES[a.event] || EVENT_TYPES.oi_surge);
     }
     rebuildOverview();
-    console.log(`[EzRadar] ready source=${dataSource} symbols=${market.size} anomalies=${anomalies.length}`);
+    watchlist.updateAll(market, market.get('BTC'));
+    saveWatchStore(true);
+    console.log(`[EzRadar] ready source=${dataSource} symbols=${market.size} anomalies=${anomalies.length} watch=${watchlist.stats().active}`);
   } catch (err) {
     console.warn('[EzRadar] bootstrap partial:', err.message);
     rebuildHotBoards();
@@ -2722,6 +2799,13 @@ setInterval(() => {
   // Board snapshot every BOARD_REFRESH_MS (~20s); sticky blend avoids full-grid wipe
   rebuildHotBoards();
   rebuildOverview();
+  // 观察池与榜单同频更新：OI 保留、箱体、触发位、评分都随时间变化
+  try {
+    watchlist.updateAll(market, market.get('BTC'));
+    saveWatchStore();
+  } catch (err) {
+    console.warn('[watch] update failed:', err.message);
+  }
   console.log(`[EzRadar] boards refreshed source=${dataSource} at=${new Date(boardsUpdatedAt).toISOString()}`);
 }, BOARD_REFRESH_MS);
 
@@ -2731,7 +2815,7 @@ setInterval(() => {
 
 const corsOrigins = (
   process.env.CORS_ORIGINS ||
-  'http://localhost:3000,http://127.0.0.1:3000,https://smart.b.ezcoin.ink,http://smart.b.ezcoin.ink'
+  'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3002,http://127.0.0.1:3002,https://smart.b.ezcoin.ink,http://smart.b.ezcoin.ink'
 )
   .split(',')
   .map((s) => s.trim())
@@ -2765,6 +2849,7 @@ app.get('/', (_req, res) => {
     vipRequired: VIP_REQUIRED,
     pollHintMs: POLL_HINT_MS,
     symbols: market.size,
+    watchlistActive: watchlist.stats().active,
   });
 });
 
@@ -2775,6 +2860,11 @@ app.get('/api/v1/config', (_req, res) => {
     boardRefreshMs: BOARD_REFRESH_MS,
     boardWindows: BOARD_WINDOWS,
     boardKinds: BOARD_KINDS.map((k) => ({ key: k.key, title: k.title, estimated: !!k.estimated })),
+    watch: {
+      tickMs: WATCH_TICK_MS,
+      ttlHours: Math.round(WATCH_TTL_MS / 3600000),
+      stages: watchlist.stageCatalog(),
+    },
     dataSource,
   });
 });
@@ -2872,6 +2962,67 @@ app.get('/api/v1/oi-moves', (req, res) => {
     meta: { vip: false, vipRequired: VIP_REQUIRED, locked: true, total: rows.length, previewTotal: preview.length, generatedAt: Date.now(), dataSource },
     moves: preview,
   });
+});
+
+const WATCH_STAGE_KEYS = new Set(['all', 'active', ...watchlist.stageCatalog().map((x) => x.key)]);
+
+app.get('/api/v1/watchlist', (req, res) => {
+  const vip = effectiveVip(req);
+  const stage = WATCH_STAGE_KEYS.has(req.query.stage) ? req.query.stage : 'active';
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toUpperCase() : '';
+  const limit = Math.min(Number(req.query.limit) || 50, vip ? 100 : 3);
+  const entries = watchlist.list({ stage, q, limit });
+  const counts = watchlist.stats();
+  return res.json({
+    meta: {
+      vip,
+      vipRequired: VIP_REQUIRED,
+      locked: !vip,
+      generatedAt: Date.now(),
+      tickMs: WATCH_TICK_MS,
+      ttlHours: Math.round(WATCH_TTL_MS / 3600000),
+      stage,
+      stages: watchlist.stageCatalog(),
+      counts,
+      events: watchlist.recentEvents(12),
+      dataSource,
+      riskNote: '规则辅助观察，不构成投资建议；小市值币种滑点与假突破风险更高。',
+      strategy: {
+        minConfirmMin: 5,
+        minSetupMin: 20,
+        minOiRetentionPct: 60,
+        maxBoxAtr: 5.2,
+        maxBoxPct: 4.2,
+        triggerVolumeRatio: 0.9,
+        rr: [1.5, 2.5],
+        riskPerTrade: '账户权益的 0.5%–1%',
+      },
+    },
+    entries,
+  });
+});
+
+app.get('/api/v1/watchlist/:symbol', (req, res) => {
+  const entry = watchlist.get(req.params.symbol);
+  if (!entry) return res.status(404).json({ error: '观察池里没有这个币种' });
+  return res.json({
+    meta: {
+      vip: effectiveVip(req),
+      generatedAt: Date.now(),
+      tickMs: WATCH_TICK_MS,
+      dataSource,
+      riskNote: '规则辅助观察，不构成投资建议。',
+    },
+    entry,
+  });
+});
+
+app.post('/api/v1/watchlist/:symbol/dismiss', (req, res) => {
+  if (VIP_REQUIRED && !req.vip) return res.status(403).json({ error: '需要 VIP' });
+  const entry = watchlist.dismiss(req.params.symbol);
+  if (!entry) return res.status(404).json({ error: '观察池里没有这个币种' });
+  saveWatchStore(true);
+  return res.json({ entry });
 });
 
 app.get('/api/v1/anomalies', (req, res) => {
@@ -2981,8 +3132,15 @@ app.get('/api/v1/rankings', (req, res) => {
   return res.json({ rankings, dataSource });
 });
 
-bootstrap().then(() => {
-  app.listen(PORT, () => {
-    console.log(`EzRadar API listening on :${PORT} (VIP_REQUIRED=${VIP_REQUIRED} TZ=${process.env.TZ || 'unset'})`);
-  });
+// 先起 HTTP，避免数据源不可达时整站打不开；bootstrap 在后台补齐真实数据
+seedFallbackUniverse();
+rebuildHotBoards();
+rebuildOverview();
+
+app.listen(PORT, () => {
+  console.log(`EzRadar API listening on :${PORT} (VIP_REQUIRED=${VIP_REQUIRED} TZ=${process.env.TZ || 'unset'})`);
 });
+
+bootstrap()
+  .then(() => console.log(`[EzRadar] bootstrap finished source=${dataSource}`))
+  .catch((err) => console.warn('[EzRadar] bootstrap failed:', err.message));
