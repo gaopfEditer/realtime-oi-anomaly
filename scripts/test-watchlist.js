@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { createWatchlist } = require('../api/src/watchlist');
+const { createWatchlist, VOLUME_STRATEGY } = require('../api/src/watchlist');
 
 const MIN = 60 * 1000;
 const NOW = Date.UTC(2026, 10, 23, 8, 0, 0);
@@ -75,6 +75,37 @@ function anomalyAt(ts, { symbol = 'ALT', side = 'up', oiPct = 5.5, oiDeltaAbs = 
     oiDeltaPct: side === 'up' ? oiPct : -oiPct,
     source: 'test',
   };
+}
+
+function testLowPricePrecision() {
+  const at = NOW - 40 * MIN;
+  const base = 0.0049;
+  const bars = barsAround({ start: NOW - 180 * MIN, count: 28, base, drift: 0.000001, range: 0.00002 });
+  for (let i = 1; i <= 7; i += 1) {
+    bars.push({
+      ts: at + i * 5 * MIN,
+      open: base,
+      close: base + 0.000002 * i,
+      high: base + 0.00001,
+      low: base - 0.00001,
+      quoteVol: 8e5,
+      takerBuyQuote: 5e5,
+    });
+  }
+  const oiSeries = [];
+  for (let i = 0; i < 48; i += 1) {
+    const ts = NOW - 240 * MIN + i * 5 * MIN;
+    oiSeries.push({ ts, oiUsdt: ts >= at ? 55.5e6 : 50e6 });
+  }
+  const row = rowFor({ symbol: 'PEPE', bars, oiSeries, price: base + 0.00001 });
+  const engine = createWatchlist({ ttlMs: 6 * 60 * MIN });
+  const w = engine.register(anomalyAt(at, { symbol: 'PEPE', price: base }), row, null, NOW);
+  assert(w, 'low-price register should create an entry');
+  assert(w.plan.long.trigger > w.plan.long.stop, 'low-price long trigger must be above stop');
+  assert(w.plan.short.trigger < w.plan.short.stop, 'low-price short trigger must be below stop');
+  assert(w.plan.long.risk > 0.000001, `low-price risk collapsed: ${w.plan.long.risk}`);
+  assert(w.plan.long.stopPct > 0.2, `low-price stop too tight: ${w.plan.long.stopPct}%`);
+  console.log('[lowprice]', `trigger=${w.plan.long.trigger}`, `stop=${w.plan.long.stop}`, `risk%=${w.plan.long.stopPct}`);
 }
 
 function testHappyPath() {
@@ -211,7 +242,143 @@ function testPersistence() {
   console.log('[persistence] restored', restored.restored, e.stage);
 }
 
+function testOptimizedProfile() {
+  const at = NOW - 40 * MIN;
+  const bars = barsAround({ start: NOW - 180 * MIN, count: 28, base: 0.99, drift: 0.00115, range: 0.004 });
+  for (let i = 1; i <= 7; i += 1) {
+    bars.push({
+      ts: at + i * 5 * MIN,
+      open: 1,
+      close: 1.001 + i * 0.0005,
+      high: 1.006,
+      low: 0.999,
+      quoteVol: 8e5,
+      takerBuyQuote: 5e5,
+    });
+  }
+  const oiSeries = [];
+  for (let i = 0; i < 48; i += 1) {
+    const ts = NOW - 240 * MIN + i * 5 * MIN;
+    let oi = 50e6;
+    if (ts >= at) oi = 55.5e6;
+    if (ts >= at + 5 * MIN) oi = 58e6;
+    oiSeries.push({ ts, oiUsdt: oi });
+  }
+  const row = rowFor({ bars, oiSeries, price: 1.001, windows: { '15m': { pricePct: 1.2, oiPct: 6, oiDelta: 3e6, flowEst: 1.2e6, spotEst: 6e5 } } });
+  const engine = createWatchlist({
+    ttlMs: 6 * 60 * MIN,
+    strategy: { stopAtr: 0.45, maxChaseAtr: 0.5, rr1: 2.0, rr2: 3.0, triggerMinScore: 62, setupMinBoxAtr: 0.6 },
+  });
+  const w = engine.register(anomalyAt(at), row, null, NOW);
+  assert(w.plan.long.rr === 2 && w.plan.short.rr2 === 3, 'optimized profile RR should be 2 / 3');
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+
+  // 收盘价已离触发位约 3.5 ATR：优化档应该拒绝追高
+  row.price = 1.032;
+  row.priceHist5m = [
+    ...row.priceHist5m,
+    { ts: NOW - 2 * MIN, open: 1.004, close: 1.032, high: 1.034, low: 1.003, quoteVol: 3.2e6, takerBuyQuote: 2.2e6 },
+  ];
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+  const chase = engine.get('ALT');
+  assert(chase.triggered == null, `chase should be blocked, got ${chase.stage}`);
+  console.log('[optimized] chase blocked, stage=', chase.stage, 'score=', chase.score);
+
+  // 回落到触发位上方约 0.1 ATR，且收盘确认突破，才允许触发
+  row.price = 1.008;
+  row.priceHist5m = [
+    ...row.priceHist5m,
+    { ts: NOW - 1 * MIN, open: 1.004, close: 1.008, high: 1.012, low: 1.003, quoteVol: 3.2e6, takerBuyQuote: 2.2e6 },
+  ];
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+  const ok = engine.get('ALT');
+  console.log('[optimized] near check:', ok.stage, {
+    price: ok.metrics.price,
+    trigger: ok.plan.long.trigger,
+    lastHigh: ok.metrics.lastBarHigh,
+    atr: ok.metrics.atr,
+    vol: ok.metrics.volumeRatio,
+    ret: ok.metrics.oiRetentionPct,
+    score: ok.score,
+    valid: ok.plan.long.valid,
+  });
+  assert(ok.triggered && ok.triggered.side === 'long', `near trigger should fire, got ${ok.stage}`);
+  assert.ok(ok.plan.long.rr === 2.0, 'triggered plan keeps optimized RR');
+  console.log('[optimized] near trigger fired:', ok.triggered.side, 'score=', ok.score);
+}
+
+function testVolumeProfile() {
+  const at = NOW - 40 * MIN;
+  const bars = barsAround({ start: NOW - 180 * MIN, count: 28, base: 0.99, drift: 0.00115, range: 0.004 });
+  for (let i = 1; i <= 7; i += 1) {
+    bars.push({
+      ts: at + i * 5 * MIN,
+      open: 1,
+      close: 1.001 + i * 0.0005,
+      high: 1.006,
+      low: 0.999,
+      quoteVol: 8e5,
+      takerBuyQuote: 5e5,
+    });
+  }
+  const oiSeries = [];
+  for (let i = 0; i < 48; i += 1) {
+    const ts = NOW - 240 * MIN + i * 5 * MIN;
+    let oi = 50e6;
+    if (ts >= at) oi = 55.5e6;
+    if (ts >= at + 5 * MIN) oi = 58e6;
+    oiSeries.push({ ts, oiUsdt: oi });
+  }
+  const row = rowFor({ bars, oiSeries, price: 1.001, windows: { '15m': { pricePct: 1.2, oiPct: 6, oiDelta: 3e6, flowEst: 1.2e6, spotEst: 6e5 } } });
+  const engine = createWatchlist({
+    ttlMs: 6 * 60 * MIN,
+    strategy: { ...VOLUME_STRATEGY, setupMinBoxAtr: 0.6 },
+  });
+  const w = engine.register(anomalyAt(at), row, null, NOW);
+  assert(w.plan.long.rr === 2 && w.plan.short.rr2 === 3, 'volume profile keeps optimized RR');
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+
+  // 无量突破：触发 bar 量比 <0.9，不应触发
+  row.price = 1.032;
+  row.priceHist5m = [
+    ...row.priceHist5m,
+    { ts: NOW - 3 * MIN, open: 1.004, close: 1.032, high: 1.034, low: 1.003, quoteVol: 4e5, takerBuyQuote: 2.2e5 },
+  ];
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+  const lowVol = engine.get('ALT');
+  assert(lowVol.triggered == null, `low volume should not trigger, got ${lowVol.stage}`);
+  assert(lowVol.morphology.barVolumeRatio < 0.9, 'low volume ratio should be recorded');
+
+  // 情绪高潮：触发 bar 量比 >1.5，也不应触发
+  row.price = 1.010;
+  row.priceHist5m = [
+    ...row.priceHist5m,
+    { ts: NOW - 2 * MIN, open: 1.004, close: 1.010, high: 1.012, low: 1.003, quoteVol: 3.2e6, takerBuyQuote: 2.2e6 },
+  ];
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+  const extreme = engine.get('ALT');
+  assert(extreme.triggered == null, `extreme volume should not trigger, got ${extreme.stage}`);
+  assert(extreme.morphology.barVolumeRatio > 1.5, 'extreme volume ratio should be recorded');
+
+  // 温和放量：0.9–1.5x，应该触发
+  row.priceHist5m = [
+    ...row.priceHist5m,
+    { ts: NOW - 1 * MIN, open: 1.004, close: 1.010, high: 1.012, low: 1.003, quoteVol: 1.1e6, takerBuyQuote: 7e5 },
+  ];
+  engine.updateAll(new Map([['ALT', row]]), null, NOW);
+  const ok = engine.get('ALT');
+  assert(ok.triggered && ok.triggered.side === 'long', `moderate volume should trigger, got ${ok.stage}`);
+  const barVol = ok.triggered.morphology.barVolumeRatio;
+  assert(barVol >= 0.9 && barVol <= 1.5, `trigger bar volume out of band: ${barVol}`);
+  console.log('[volume] low blocked', lowVol.morphology.barVolumeRatio,
+    'extreme blocked', extreme.morphology.barVolumeRatio,
+    'triggered', barVol, 'stage=', ok.stage);
+}
+
+testLowPricePrecision();
 testHappyPath();
+testOptimizedProfile();
+testVolumeProfile();
 testOiGiveback();
 testExpiry();
 testPersistence();

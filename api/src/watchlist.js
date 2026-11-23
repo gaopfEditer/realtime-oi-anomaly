@@ -27,6 +27,81 @@ const STAGE_DEFS = {
 const TERMINAL = new Set(['invalid', 'expired', 'dismissed']);
 const ALT_MAJORS = new Set(['BTC', 'ETH', 'BNB']);
 
+// 策略参数集中在这里。默认值 = 线上当前规则；回测/调参时只覆盖需要变的部分。
+const DEFAULT_STRATEGY = Object.freeze({
+  triggerAtr: 0.12,
+  triggerMinPct: 0.0005,
+  stopAtr: 0.25,
+  stopMinPct: 0.0005,
+  rr1: 1.5,
+  rr2: 2.5,
+  lateAtr: 0.5,
+  setupMinAgeMin: 20,
+  setupMinRetentionPct: 60,
+  setupMinBoxAtr: 0.7,
+  setupMaxBoxAtr: 5.2,
+  setupMaxBoxPct: 4.2,
+  setupMaxFundingPct: 0.12,
+  triggerMinVolumeRatio: 0.9,
+  triggerMinRetentionPct: 40,
+  triggerNearAtr: 0.35,
+  triggerMinScore: 0,
+  // 突破后价格离触发位超过该 ATR 倍数则不追；Infinity = 不限制（旧行为）
+  maxChaseAtr: Infinity,
+  // 是否要求信号 bar 收盘价也站在触发位之外，过滤“插针后收回”的假突破
+  requireCloseBeyondTrigger: false,
+  // 信号 bar 形态：逆向影线占比上限（1 = 不过滤），收盘位置要求（0 = 不过滤）
+  maxAdverseWickPct: 1,
+  minCloseLocation: 0,
+  // 顺势插针：多头要求下影线、空头要求上影线至少占 bar 振幅该比例（0 = 不过滤）
+  minFavorableWickPct: 0,
+  // 最高价/最低价穿过触发位、收盘又收回箱体，视为插针假突破
+  blockFailedBreakout: false,
+  // 也可只对单边要求收盘确认，便于回测多空差异
+  blockFailedLongBreakout: false,
+  blockFailedShortBreakout: false,
+  // 触发 bar 相对前 20 根均量的放量倍数（0 = 不过滤）
+  triggerMinBarVolumeRatio: 0,
+  // 放量上限：超过该倍数视为情绪高潮，反而容易衰竭（Infinity = 不过滤）
+  triggerMaxBarVolumeRatio: Infinity,
+  // 突破前 3 根是否缩量（0 = 不过滤；例如 0.8 表示必须低于均量 0.8）
+  maxPreBreakoutVolumeRatio: 0,
+  // 多周期共振：none / 15m / 1h / both
+  mtfMode: 'none',
+  maxStopPct: 2.6,
+  armMinScore: 55,
+  btcBlockPct: 1.2,
+  gradeA: 75,
+  gradeB: 58,
+  minOiInvalidPct: 25,
+  minOiInvalidAgeMin: 10
+});
+
+function resolveStrategy(overrides = {}) {
+  if (overrides && overrides.__resolved) return overrides;
+  return { ...DEFAULT_STRATEGY, ...(overrides || {}), __resolved: true };
+}
+
+// 2026-10 回测后的优化档：放宽止损、限制追高、提高 RR、只做评分 ≥62 的触发。
+// DEFAULT_STRATEGY 保留为旧规则，便于 A/B 回测；线上默认使用 OPTIMIZED_STRATEGY。
+const OPTIMIZED_STRATEGY = Object.freeze({
+  ...DEFAULT_STRATEGY,
+  stopAtr: 0.45,
+  maxChaseAtr: 0.5,
+  rr1: 2.0,
+  rr2: 3.0,
+  triggerMinScore: 62
+});
+
+// 2026-11 形态/量能测试后的默认档：
+// 5m 触发 bar 相对前 20 根均量的 0.9–1.5x 为“有效放量”；
+// <0.9x 多为无量假突破，>1.5x 多为情绪高潮/衰竭。多周期趋势过滤未通过分段验证。
+const VOLUME_STRATEGY = Object.freeze({
+  ...OPTIMIZED_STRATEGY,
+  triggerMinBarVolumeRatio: 0.9,
+  triggerMaxBarVolumeRatio: 1.5
+});
+
 function num(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -39,6 +114,19 @@ function clamp(n, lo, hi) {
 function round(n, digits = 4) {
   const p = 10 ** digits;
   return Math.round(num(n) * p) / p;
+}
+
+// 低价币（PEPE/SHIB 等）不能统一按 4 位小数取整，否则触发位、止损位会被抹平。
+function priceDigits(price) {
+  const p = Math.abs(num(price));
+  if (p >= 1) return 4;
+  if (p >= 0.01) return 6;
+  if (p >= 0.0001) return 8;
+  return 10;
+}
+
+function roundPrice(n, price) {
+  return round(n, priceDigits(price));
 }
 
 function fmtUsd(n, { signed = false } = {}) {
@@ -131,6 +219,62 @@ function meanQuoteVol(bars) {
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
+function barOpen(b) {
+  if (!b) return 0;
+  const o = num(b.open, NaN);
+  if (Number.isFinite(o) && o > 0) return o;
+  return barClose(b);
+}
+
+function barVolume(b) {
+  return num(b && b.quoteVol, 0) || num(b && b.volume, 0);
+}
+
+// 把 5m K 线聚合成 15m / 1h。只保留在信号 bar 收盘时已经完整走完的桶，
+// 避免把当前未走完的高周期 bar 当成已知信息。
+function aggregateTf(bars, bucketMs, signalCloseTs) {
+  const groups = [];
+  let cur = null;
+  for (const b of bars) {
+    const ts = barTs(b);
+    if (!(ts > 0)) continue;
+    const start = Math.floor(ts / bucketMs) * bucketMs;
+    if (!cur || cur.ts !== start) {
+      cur = {
+        ts: start,
+        open: barOpen(b),
+        high: barHigh(b),
+        low: barLow(b),
+        close: barClose(b),
+        quoteVol: 0,
+      };
+      groups.push(cur);
+    }
+    cur.high = Math.max(cur.high, barHigh(b));
+    cur.low = Math.min(cur.low, barLow(b));
+    cur.close = barClose(b);
+    cur.quoteVol += barVolume(b);
+  }
+  return groups.filter((g) => g.ts + bucketMs <= signalCloseTs);
+}
+
+function ema(values, period) {
+  if (!Array.isArray(values) || values.length < period || period <= 0) return 0;
+  const k = 2 / (period + 1);
+  let e = values[0];
+  for (let i = 1; i < values.length; i += 1) e = values[i] * k + e * (1 - k);
+  return e;
+}
+
+function tfTrend(bars) {
+  const closes = bars.map((b) => barClose(b)).filter((x) => x > 0);
+  if (closes.length < 23) return { trend: 'unknown', bars: closes.length };
+  const fast = ema(closes, 8);
+  const slow = ema(closes, 21);
+  if (!(fast > 0) || !(slow > 0)) return { trend: 'unknown', bars: closes.length };
+  return { trend: fast > slow ? 'up' : 'down', bars: closes.length, fast: round(fast, 6), slow: round(slow, 6) };
+}
+
 function findOiBaseline(oiSeries, atTs, fallback) {
   if (!Array.isArray(oiSeries) || !oiSeries.length) return fallback;
   let prev = null;
@@ -159,38 +303,43 @@ function priceExtremes(bars) {
   };
 }
 
-function buildPlan(side, boxHigh, boxLow, atr, price) {
-  const buffer = Math.max(atr * 0.12, price * 0.0005);
+function buildPlan(side, boxHigh, boxLow, atr, price, strategy = DEFAULT_STRATEGY) {
+  const s = strategy;
+  const buffer = Math.max(atr * s.triggerAtr, price * s.triggerMinPct);
   const trigger = side === 'long' ? boxHigh + buffer : boxLow - buffer;
   const stop = side === 'long'
-    ? boxLow - Math.max(atr * 0.25, price * 0.0005)
-    : boxHigh + Math.max(atr * 0.25, price * 0.0005);
+    ? boxLow - Math.max(atr * s.stopAtr, price * s.stopMinPct)
+    : boxHigh + Math.max(atr * s.stopAtr, price * s.stopMinPct);
   const risk = Math.abs(trigger - stop);
-  const target1 = side === 'long' ? trigger + risk * 1.5 : trigger - risk * 1.5;
-  const target2 = side === 'long' ? trigger + risk * 2.5 : trigger - risk * 2.5;
+  const target1 = side === 'long' ? trigger + risk * s.rr1 : trigger - risk * s.rr1;
+  const target2 = side === 'long' ? trigger + risk * s.rr2 : trigger - risk * s.rr2;
   const widthAtr = atr > 0 ? (boxHigh - boxLow) / atr : 0;
   const widthPct = boxLow > 0 ? ((boxHigh - boxLow) / boxLow) * 100 : 0;
   const stopPct = trigger > 0 ? (risk / trigger) * 100 : 0;
   const distancePct = price > 0 ? ((trigger - price) / price) * 100 : 0;
-  const late = side === 'long' ? price > trigger + atr * 0.5 : price < trigger - atr * 0.5;
-  const valid = boxHigh > boxLow && risk > 0 && widthAtr <= 5.2 && widthPct <= 4.2 && stopPct <= 2.6;
+  const late = side === 'long' ? price > trigger + atr * s.lateAtr : price < trigger - atr * s.lateAtr;
+  const valid = boxHigh > boxLow && risk > 0
+    && widthAtr <= s.setupMaxBoxAtr
+    && widthPct <= s.setupMaxBoxPct
+    && stopPct <= s.maxStopPct;
+  const pd = priceDigits(price);
   let note = '';
   if (late) note = '价格已离开触发位，等回踩，不追';
-  else if (widthAtr > 5.2) note = '箱体过宽，等待收敛';
-  else if (widthPct > 4.2) note = '箱体宽度偏大，盈亏比不稳定';
-  else if (stopPct > 2.6) note = '止损距离过宽，需降低仓位';
+  else if (widthAtr > s.setupMaxBoxAtr) note = '箱体过宽，等待收敛';
+  else if (widthPct > s.setupMaxBoxPct) note = '箱体宽度偏大，盈亏比不稳定';
+  else if (stopPct > s.maxStopPct) note = '止损距离过宽，需降低仓位';
   else if (widthAtr < 0.8) note = '箱体偏窄，注意假突破';
   else note = '等待放量突破触发位';
   return {
     side,
     sideLabel: side === 'long' ? '多' : '空',
-    trigger: round(trigger),
-    stop: round(stop),
-    target1: round(target1),
-    target2: round(target2),
-    risk: round(risk),
-    rr: 1.5,
-    rr2: 2.5,
+    trigger: round(trigger, pd),
+    stop: round(stop, pd),
+    target1: round(target1, pd),
+    target2: round(target2, pd),
+    risk: round(risk, pd),
+    rr: s.rr1,
+    rr2: s.rr2,
     stopPct: round(stopPct, 2),
     triggerDistancePct: round(distancePct, 2),
     widthAtr: round(widthAtr, 2),
@@ -209,7 +358,8 @@ function buildPlan(side, boxHigh, boxLow, atr, price) {
  * @param {Array} bars normalized 5m klines
  * @param {number} now
  */
-function analyze(entry, row, btcRow, bars, now) {
+function analyze(entry, row, btcRow, bars, now, strategy = DEFAULT_STRATEGY) {
+  const s = strategy;
   const price = num(row && row.price, 0) || num(entry.impulse.priceAtDetect, 0);
   const atr = atrFromBars(bars, 14) || num(entry.refs.atr, 0) || price * 0.004;
   const atTs = entry.anomalyTs;
@@ -236,6 +386,15 @@ function analyze(entry, row, btcRow, bars, now) {
   const recentVol = meanQuoteVol(recentBars);
   const baseVol = meanQuoteVol(preBars) || meanQuoteVol(bars.slice(0, Math.max(1, Math.min(12, bars.length))));
   const volumeRatio = baseVol > 0 ? recentVol / baseVol : 0;
+
+  const signalBar = bars[bars.length - 1] || null;
+  const prior20Bars = bars.slice(Math.max(0, bars.length - 21), Math.max(0, bars.length - 1));
+  const prior20Vol = meanQuoteVol(prior20Bars);
+  const signalVol = barVolume(signalBar);
+  const barVolumeRatio = prior20Vol > 0 ? signalVol / prior20Vol : 0;
+  const pre3Bars = bars.slice(Math.max(0, bars.length - 4), Math.max(0, bars.length - 1));
+  const pre3Vol = meanQuoteVol(pre3Bars);
+  const preBreakoutVolumeRatio = prior20Vol > 0 ? pre3Vol / prior20Vol : 0;
 
   const vwap = vwapOf((after.length >= 3 ? after : bars).slice(-36)) || price;
   const vwapDistancePct = vwap > 0 ? ((price - vwap) / vwap) * 100 : 0;
@@ -286,9 +445,55 @@ function analyze(entry, row, btcRow, bars, now) {
   if (longPts >= 3 && longPts >= shortPts + 1) bias = 'long';
   else if (shortPts >= 3 && shortPts >= longPts + 1) bias = 'short';
 
-  const longPlan = buildPlan('long', boxHigh, boxLow, atr, price);
-  const shortPlan = buildPlan('short', boxHigh, boxLow, atr, price);
+  const longPlan = buildPlan('long', boxHigh, boxLow, atr, price, s);
+  const shortPlan = buildPlan('short', boxHigh, boxLow, atr, price, s);
   const activeSide = entry.triggered ? entry.triggered.side : bias === 'short' ? 'short' : bias === 'long' ? 'long' : 'both';
+
+  // 信号 bar 形态：影线、收盘位置、插针假突破、触发 bar 放量、多周期趋势。
+  const sigHigh = signalBar ? barHigh(signalBar) : 0;
+  const sigLow = signalBar ? barLow(signalBar) : 0;
+  const sigOpen = signalBar ? barOpen(signalBar) : 0;
+  const sigClose = signalBar ? barClose(signalBar) : 0;
+  const sigRange = Math.max(0, sigHigh - sigLow);
+  const bodyHigh = Math.max(sigOpen, sigClose);
+  const bodyLow = Math.min(sigOpen, sigClose);
+  const upperWickPct = sigRange > 0 ? clamp((sigHigh - bodyHigh) / sigRange, 0, 1) : 0;
+  const lowerWickPct = sigRange > 0 ? clamp((bodyLow - sigLow) / sigRange, 0, 1) : 0;
+  const closeLocation = sigRange > 0 ? clamp((sigClose - sigLow) / sigRange, 0, 1) : 0.5;
+  const bodyPct = sigRange > 0 ? clamp(Math.abs(sigClose - sigOpen) / sigRange, 0, 1) : 0;
+
+  const signalCloseTs = barTs(signalBar) + 5 * 60 * 1000;
+  const tf15 = tfTrend(aggregateTf(bars, 15 * 60 * 1000, signalCloseTs));
+  const tf1h = tfTrend(aggregateTf(bars, 60 * 60 * 1000, signalCloseTs));
+  const mtfResonance = tf15.trend === 'up' && tf1h.trend === 'up'
+    ? 'long'
+    : tf15.trend === 'down' && tf1h.trend === 'down'
+      ? 'short'
+      : 'none';
+
+  const failedLongBreakout = !!(signalBar && longPlan.trigger > 0
+    && sigHigh >= longPlan.trigger && sigClose < longPlan.trigger);
+  const failedShortBreakout = !!(signalBar && shortPlan.trigger > 0
+    && sigLow <= shortPlan.trigger && sigClose > shortPlan.trigger);
+
+  const morphology = {
+    upperWickPct: round(upperWickPct * 100, 1),
+    lowerWickPct: round(lowerWickPct * 100, 1),
+    upperWickRatio: round(upperWickPct, 3),
+    lowerWickRatio: round(lowerWickPct, 3),
+    bodyPct: round(bodyPct * 100, 1),
+    closeLocation: round(closeLocation, 2),
+    shortCloseLocation: round(1 - closeLocation, 2),
+    barVolumeRatio: round(barVolumeRatio, 2),
+    preBreakoutVolumeRatio: round(preBreakoutVolumeRatio, 2),
+    failedLongBreakout,
+    failedShortBreakout,
+    tf15: tf15.trend,
+    tf1h: tf1h.trend,
+    tf15Bars: tf15.bars,
+    tf1hBars: tf1h.bars,
+    resonance: mtfResonance,
+  };
 
   // 评分：0–100，只用于排序与“值不值得继续看”，不是胜率
   const parts = {};
@@ -308,17 +513,20 @@ function analyze(entry, row, btcRow, bars, now) {
   const btcOpposed = bias === 'long' ? btc15mPct < -1.2 : bias === 'short' ? btc15mPct > 1.2 : false;
   parts.btc = btcOpposed ? 0 : btcAligned ? 5 : 2.5;
   const score = Math.round(clamp(Object.values(parts).reduce((a, b) => a + b, 0), 0, 100));
-  const grade = score >= 75 ? 'A' : score >= 58 ? 'B' : 'C';
+  const grade = score >= s.gradeA ? 'A' : score >= s.gradeB ? 'B' : 'C';
 
   const warnings = [];
   if (retention < 50) warnings.push(`OI 已回吐，结构保留 ${retention.toFixed(0)}%`);
   if (funding > 0.06) warnings.push(`资金费率 ${fmtFunding(funding)}，多头偏拥挤`);
   if (funding < -0.06) warnings.push(`资金费率 ${fmtFunding(funding)}，空头偏拥挤`);
   if (quoteVol > 0 && quoteVol < 5e6) warnings.push(`24h 成交额 ${fmtUsd(quoteVol)}，流动性偏薄`);
-  if (boxWidthAtr > 5.2) warnings.push(`箱体宽度 ${boxWidthAtr.toFixed(1)} ATR，尚未收敛`);
+  if (boxWidthAtr > s.setupMaxBoxAtr) warnings.push(`箱体宽度 ${boxWidthAtr.toFixed(1)} ATR，尚未收敛`);
   if (btcOpposed) warnings.push(`BTC 15m ${fmtPct(btc15mPct)}，方向逆风`);
   if (longPlan.late || shortPlan.late) warnings.push('价格已离开触发位，勿追，等回踩');
   if (Math.abs(priceSinceDetectPct) > 3) warnings.push(`侦测后已波动 ${fmtPct(priceSinceDetectPct)}，追高风险`);
+  if (upperWickPct >= 0.5) warnings.push(`信号 bar 上影线 ${(upperWickPct * 100).toFixed(0)}%，向上突破有插针回落风险`);
+  if (lowerWickPct >= 0.5) warnings.push(`信号 bar 下影线 ${(lowerWickPct * 100).toFixed(0)}%，向下突破有插针收回风险`);
+  if (failedLongBreakout || failedShortBreakout) warnings.push('触发位出现插针后收回，假突破风险');
 
   const reasons = [
     `OI ${fmtPct(num(entry.impulse.oiPct, 0))} / ${fmtUsd(num(entry.impulse.oiDeltaAbs, 0), { signed: true })}（5m）`,
@@ -327,6 +535,7 @@ function analyze(entry, row, btcRow, bars, now) {
     `主动买入占比 ${(takerBuyRatio * 100).toFixed(1)}%，15m 相对 BTC ${fmtPct(relBtcPct)}`,
     `资金费率 ${fmtFunding(funding)}，24h 额 ${fmtUsd(quoteVol)}`,
     `BTC 15m ${fmtPct(btc15mPct)}`,
+    `信号 bar 上影 ${(upperWickPct * 100).toFixed(0)}% / 下影 ${(lowerWickPct * 100).toFixed(0)}%，量比 ${barVolumeRatio.toFixed(2)}x，15m ${tf15.trend} / 1h ${tf1h.trend}`,
   ];
 
   const impulseLow = num(entry.refs.impulseLow, boxLow);
@@ -360,20 +569,22 @@ function analyze(entry, row, btcRow, bars, now) {
 
   const ageMin = Math.max(0, (now - entry.createdAt) / 60000);
   const timeLeftSec = Math.max(0, Math.floor((entry.expiresAt - now) / 1000));
+  const pd = priceDigits(price);
   const liveBar = bars[bars.length - 1] || boxBars[boxBars.length - 1] || null;
 
   return {
     price,
-    atr: round(atr),
+    atr: round(atr, pd),
     atrPct: price > 0 ? round((atr / price) * 100, 2) : 0,
-    vwap: round(vwap),
+    vwap: round(vwap, pd),
     vwapDistancePct: round(vwapDistancePct, 2),
-    boxHigh: round(boxHigh),
-    boxLow: round(boxLow),
-    boxMid: round(boxMid),
+    boxHigh: round(boxHigh, pd),
+    boxLow: round(boxLow, pd),
+    boxMid: round(boxMid, pd),
     boxWidthPct: round(boxWidthPct, 2),
     boxWidthAtr: round(boxWidthAtr, 2),
     volumeRatio: round(volumeRatio, 2),
+    morphology,
     takerBuyRatio: round(takerBuyRatio * 100, 1),
     oiNow: round(oiNow, 0),
     oiRetentionPct: round(retention, 0),
@@ -399,12 +610,13 @@ function analyze(entry, row, btcRow, bars, now) {
     invalidation,
     ageMin: round(ageMin, 1),
     timeLeftSec,
-    lastBarHigh: liveBar ? round(barHigh(liveBar)) : 0,
-    lastBarLow: liveBar ? round(barLow(liveBar)) : 0,
+    lastBarHigh: liveBar ? round(barHigh(liveBar), pd) : 0,
+    lastBarLow: liveBar ? round(barLow(liveBar), pd) : 0,
   };
 }
 
-function decisionFor(entry, a, bars, now) {
+function decisionFor(entry, a, bars, now, strategy = DEFAULT_STRATEGY) {
+  const s = strategy;
   if (TERMINAL.has(entry.stage)) return { stage: entry.stage, note: '' };
 
   if (entry.stage === 'triggered') {
@@ -418,33 +630,93 @@ function decisionFor(entry, a, bars, now) {
   const hardFail = a.invalidation.find((x) => x.key !== 'time' && !x.ok);
   if (hardFail) return { stage: 'invalid', note: `失效：${hardFail.label}（${hardFail.detail}）` };
   if (now >= entry.expiresAt) return { stage: 'expired', note: '6 小时未触发，移出观察池' };
-  if (a.oiRetentionPct < 25 && a.ageMin > 10) {
+  if (a.oiRetentionPct < s.minOiInvalidPct && a.ageMin > s.minOiInvalidAgeMin) {
     return { stage: 'invalid', note: `OI 结构保留仅 ${a.oiRetentionPct}%，异动已回吐` };
   }
 
-  const setupOk = a.ageMin >= 20
-    && a.oiRetentionPct >= 60
-    && a.boxWidthAtr >= 0.7
-    && a.boxWidthAtr <= 5.2
-    && a.boxWidthPct <= 4.2
-    && Math.abs(a.funding) < 0.12;
+  const setupOk = a.ageMin >= s.setupMinAgeMin
+    && a.oiRetentionPct >= s.setupMinRetentionPct
+    && a.boxWidthAtr >= s.setupMinBoxAtr
+    && a.boxWidthAtr <= s.setupMaxBoxAtr
+    && a.boxWidthPct <= s.setupMaxBoxPct
+    && Math.abs(a.funding) < s.setupMaxFundingPct;
 
-  const near = (plan) => a.atr > 0 && Math.abs(a.price - plan.trigger) <= a.atr * 0.35;
+  const near = (plan) => a.atr > 0 && Math.abs(a.price - plan.trigger) <= a.atr * s.triggerNearAtr;
+
+  const morphologyOk = (side) => {
+    if (side === 'both') return morphologyOk('long') && morphologyOk('short');
+    const m = a.morphology || {};
+    if (s.maxAdverseWickPct < 1) {
+      const adverse = side === 'long' ? num(m.upperWickRatio, 1) : num(m.lowerWickRatio, 1);
+      if (adverse > s.maxAdverseWickPct) return false;
+    }
+    if (s.minCloseLocation > 0) {
+      const loc = side === 'long' ? num(m.closeLocation, 0.5) : num(m.shortCloseLocation, 0.5);
+      if (loc < s.minCloseLocation) return false;
+    }
+    if (s.minFavorableWickPct > 0) {
+      const favorable = side === 'long' ? num(m.lowerWickRatio, 0) : num(m.upperWickRatio, 0);
+      if (favorable < s.minFavorableWickPct) return false;
+    }
+    if (s.blockFailedBreakout || (side === 'long' && s.blockFailedLongBreakout)) {
+      if (side === 'long' && m.failedLongBreakout) return false;
+    }
+    if (s.blockFailedBreakout || (side === 'short' && s.blockFailedShortBreakout)) {
+      if (side === 'short' && m.failedShortBreakout) return false;
+    }
+    return true;
+  };
+
+  const mtfOk = (side) => {
+    const m = a.morphology || {};
+    if (s.mtfMode === 'none') return true;
+    const dir = side === 'long' ? 'up' : 'down';
+    const ok15 = m.tf15 === dir;
+    const ok1h = m.tf1h === dir;
+    if (s.mtfMode === '15m') return ok15;
+    if (s.mtfMode === '1h') return ok1h;
+    if (s.mtfMode === 'both') return ok15 && ok1h;
+    return true;
+  };
+
+  const barVolumeOk = !(s.triggerMinBarVolumeRatio > 0)
+    || num(a.morphology && a.morphology.barVolumeRatio, 0) >= s.triggerMinBarVolumeRatio;
+  const barVolumeCapOk = !(Number.isFinite(s.triggerMaxBarVolumeRatio) && s.triggerMaxBarVolumeRatio > 0)
+    || num(a.morphology && a.morphology.barVolumeRatio, 0) <= s.triggerMaxBarVolumeRatio;
+  const preVolumeOk = !(s.maxPreBreakoutVolumeRatio > 0)
+    || num(a.morphology && a.morphology.preBreakoutVolumeRatio, 0) <= s.maxPreBreakoutVolumeRatio;
 
   if (entry.stage === 'setup' || entry.stage === 'armed') {
     if (!setupOk) {
-      if (a.boxWidthAtr > 5.2) return { stage: 'confirming', note: '箱体变宽，回到确认阶段等收敛' };
+      if (a.boxWidthAtr > s.setupMaxBoxAtr) return { stage: 'confirming', note: '箱体变宽，回到确认阶段等收敛' };
       return { stage: 'setup', note: '' };
     }
-    const volumeOk = a.volumeRatio >= 0.9;
-    const oiOk = a.oiRetentionPct >= 40;
-    const longHit = a.plan.long.valid && a.lastBarHigh >= a.plan.long.trigger && a.price >= a.plan.long.trigger - a.atr * 0.35;
-    const shortHit = a.plan.short.valid && a.lastBarLow <= a.plan.short.trigger && a.price <= a.plan.short.trigger + a.atr * 0.35;
-    if (volumeOk && oiOk && (longHit || shortHit)) {
+    const volumeOk = a.volumeRatio >= s.triggerMinVolumeRatio;
+    const oiOk = a.oiRetentionPct >= s.triggerMinRetentionPct;
+    const longPlan = a.plan.long;
+    const shortPlan = a.plan.short;
+    const maxChase = Number.isFinite(s.maxChaseAtr) ? a.atr * s.maxChaseAtr : Infinity;
+    const longCloseOk = !s.requireCloseBeyondTrigger || a.price >= longPlan.trigger;
+    const shortCloseOk = !s.requireCloseBeyondTrigger || a.price <= shortPlan.trigger;
+    const longHit = longPlan.valid
+      && morphologyOk('long')
+      && mtfOk('long')
+      && a.lastBarHigh >= longPlan.trigger
+      && a.price >= longPlan.trigger - a.atr * s.triggerNearAtr
+      && a.price <= longPlan.trigger + maxChase
+      && longCloseOk;
+    const shortHit = shortPlan.valid
+      && morphologyOk('short')
+      && mtfOk('short')
+      && a.lastBarLow <= shortPlan.trigger
+      && a.price <= shortPlan.trigger + a.atr * s.triggerNearAtr
+      && a.price >= shortPlan.trigger - maxChase
+      && shortCloseOk;
+    if (volumeOk && barVolumeOk && barVolumeCapOk && preVolumeOk && oiOk && a.score >= s.triggerMinScore && (longHit || shortHit)) {
       let side = longHit && shortHit ? (a.price >= a.boxMid ? 'long' : 'short') : longHit ? 'long' : 'short';
       if (a.bias === 'long' && !longHit && shortHit) side = 'short';
       if (a.bias === 'short' && longHit && !shortHit) side = 'long';
-      const btcBlock = side === 'long' ? a.btc15mPct < -1.2 : a.btc15mPct > 1.2;
+      const btcBlock = side === 'long' ? a.btc15mPct < -s.btcBlockPct : a.btc15mPct > s.btcBlockPct;
       if (!btcBlock) {
         const plan = a.plan[side];
         return {
@@ -456,14 +728,19 @@ function decisionFor(entry, a, bars, now) {
       return { stage: 'armed', note: '已到触发位，但 BTC 逆风，暂不触发' };
     }
     if (near(a.plan.long) || near(a.plan.short)) {
-      const weak = !volumeOk ? '，放量不足' : '';
-      return { stage: 'armed', note: `价格接近触发位${weak}` };
+      const why = [];
+      if (!volumeOk) why.push('放量不足');
+      if (!barVolumeOk) why.push('触发 bar 量比不足');
+      if (!barVolumeCapOk) why.push('触发 bar 放量过度');
+      if (!preVolumeOk) why.push('突破前未缩量');
+      if (!morphologyOk(a.bias === 'long' ? 'long' : a.bias === 'short' ? 'short' : 'both')) why.push('信号 bar 形态未确认');
+      return { stage: 'armed', note: `价格接近触发位${why.length ? `，${why.join('、')}` : ''}` };
     }
     return { stage: 'setup', note: '' };
   }
 
   if (setupOk) {
-    if (a.score >= 55 && (near(a.plan.long) || near(a.plan.short))) {
+    if (a.score >= s.armMinScore && (near(a.plan.long) || near(a.plan.short))) {
       return { stage: 'armed', note: '价格进入触发区，等放量确认' };
     }
     return { stage: 'setup', note: '箱体已收敛，计算双向触发位' };
@@ -515,9 +792,10 @@ function evaluateOutcome(entry, a, bars, now) {
   };
 }
 
-function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvents = 40 } = {}) {
+function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvents = 40, strategy = {} } = {}) {
   const entries = new Map();
   const events = [];
+  const cfg = resolveStrategy(strategy);
   let seq = 1;
 
   function makeId() {
@@ -672,7 +950,7 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
       source: row.source || anomaly.source || 'binance',
     };
 
-    entry.analysis = analyze(entry, row, btcRow, bars, now);
+    entry.analysis = analyze(entry, row, btcRow, bars, now, cfg);
     entries.set(symbol, entry);
     trimEntries(now);
     return serialize(entry, now);
@@ -686,10 +964,10 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
       const row = market.get(entry.symbol);
       if (!row || !(num(row.price) > 0)) continue;
       const bars = normalizeBars(row.priceHist5m);
-      const a = analyze(entry, row, btcRow, bars, now);
+      const a = analyze(entry, row, btcRow, bars, now, cfg);
       entry.analysis = a;
       entry.updatedAt = now;
-      const d = decisionFor(entry, a, bars, now);
+      const d = decisionFor(entry, a, bars, now, cfg);
       if (d.stage === 'triggered' && !entry.triggered && d.triggeredSide) {
         const plan = a.plan[d.triggeredSide];
         entry.triggered = {
@@ -701,6 +979,7 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
           target1: plan.target1,
           target2: plan.target2,
           volumeRatio: a.volumeRatio,
+          morphology: a.morphology,
         };
       }
       if (d.outcome) entry.outcome = d.outcome;
@@ -769,6 +1048,11 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
         funding: a.funding || 0,
         fundingDisplay: a.fundingDisplay || fmtFunding(entry.impulse.funding),
         volumeRatio: a.volumeRatio || 0,
+        barVolumeRatio: a.morphology ? a.morphology.barVolumeRatio : 0,
+        upperWickPct: a.morphology ? a.morphology.upperWickPct : 0,
+        lowerWickPct: a.morphology ? a.morphology.lowerWickPct : 0,
+        tf15: a.morphology ? a.morphology.tf15 : 'unknown',
+        tf1h: a.morphology ? a.morphology.tf1h : 'unknown',
         takerBuyRatio: a.takerBuyRatio || 0,
         lastBarHigh: a.lastBarHigh || 0,
         lastBarLow: a.lastBarLow || 0,
@@ -776,6 +1060,7 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
         quoteVolumeDisplay: a.quoteVolumeDisplay || fmtUsd(entry.impulse.quoteVol),
       },
       plan: a.plan || null,
+      morphology: a.morphology || null,
       scoreParts: a.scoreParts || {},
       reasons: a.reasons || [],
       warnings: a.warnings || [],
@@ -888,6 +1173,10 @@ function createWatchlist({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 80, maxEvent
 module.exports = {
   createWatchlist,
   STAGE_DEFS,
+  DEFAULT_STRATEGY,
+  OPTIMIZED_STRATEGY,
+  VOLUME_STRATEGY,
+  resolveStrategy,
   // 导出纯函数，便于单测与后续复用
   analyze,
   decisionFor,

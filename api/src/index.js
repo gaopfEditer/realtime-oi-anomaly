@@ -3,7 +3,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
-const { createWatchlist } = require('./watchlist');
+const { createWatchlist, DEFAULT_STRATEGY, OPTIMIZED_STRATEGY, VOLUME_STRATEGY } = require('./watchlist');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -170,6 +170,12 @@ const OI_POLL_MS = 40000;
 const BOARD_REFRESH_MS = 20000;
 const WATCH_TICK_MS = 20000; // 观察池阶段机更新频率
 const WATCH_TTL_MS = 6 * 60 * 60 * 1000; // 异动后最多观察 6 小时
+const WATCH_PROFILE = process.env.WATCH_STRATEGY_PROFILE || 'volume';
+const WATCH_STRATEGY = WATCH_PROFILE === 'legacy'
+  ? DEFAULT_STRATEGY
+  : WATCH_PROFILE === 'optimized'
+    ? OPTIMIZED_STRATEGY
+    : VOLUME_STRATEGY;
 const WATCH_STORE_PATH = process.env.WATCH_STORE_PATH || path.join(__dirname, '..', 'data', 'watchlist.json'); // boards recompute ~20s (was 45s)
 const TARGET_FEED = 100; // denser feed (~mercu anomaly-v4 size)
 const BOARD_VALUE_N = 7;
@@ -393,7 +399,7 @@ const COIN_ENRICH_TTL_MS = 30000;
  * 异动后观察池：OI 异动自动入池，阶段机 + 双向入场计划 + 失效条件。
  * 纯内存运行；每 60s 落盘一次，重启后可恢复 6 小时内的观察。
  */
-const watchlist = createWatchlist({ ttlMs: WATCH_TTL_MS });
+const watchlist = createWatchlist({ ttlMs: WATCH_TTL_MS, strategy: WATCH_STRATEGY });
 let lastWatchSaveAt = 0;
 
 function loadWatchStore() {
@@ -720,7 +726,10 @@ async function fetchKlines5m(pair, limit = 24) {
   return data.map((k) => ({
     ts: Number(k[0]),
     open: Number(k[1]),
+    high: Number(k[2]),
+    low: Number(k[3]),
     close: Number(k[4]),
+    volume: Number(k[5]),
     quoteVol: Number(k[7]),
     takerBuyQuote: Number(k[10]),
   }));
@@ -832,7 +841,7 @@ async function refreshOiAndKlines() {
         fetchOiHist(meta.pair, '1h', 8),
         fetchOiHist(meta.pair, '4h', 6),
         fetchOiHist(meta.pair, '1d', 5),
-        fetchKlines5m(meta.pair, 80),
+        fetchKlines5m(meta.pair, 360),
       ]);
       row.oiHist['5m'] = oi5;
       row.oiHist['1d'] = oi1d;
@@ -2863,6 +2872,8 @@ app.get('/api/v1/config', (_req, res) => {
     watch: {
       tickMs: WATCH_TICK_MS,
       ttlHours: Math.round(WATCH_TTL_MS / 3600000),
+      profile: WATCH_PROFILE,
+      strategy: WATCH_STRATEGY,
       stages: watchlist.stageCatalog(),
     },
     dataSource,
@@ -2988,13 +2999,18 @@ app.get('/api/v1/watchlist', (req, res) => {
       dataSource,
       riskNote: '规则辅助观察，不构成投资建议；小市值币种滑点与假突破风险更高。',
       strategy: {
+        profile: WATCH_PROFILE,
         minConfirmMin: 5,
-        minSetupMin: 20,
-        minOiRetentionPct: 60,
-        maxBoxAtr: 5.2,
-        maxBoxPct: 4.2,
-        triggerVolumeRatio: 0.9,
-        rr: [1.5, 2.5],
+        minSetupMin: WATCH_STRATEGY.setupMinAgeMin,
+        minOiRetentionPct: WATCH_STRATEGY.setupMinRetentionPct,
+        maxBoxAtr: WATCH_STRATEGY.setupMaxBoxAtr,
+        maxBoxPct: WATCH_STRATEGY.setupMaxBoxPct,
+        triggerVolumeRatio: WATCH_STRATEGY.triggerMinVolumeRatio,
+        triggerBarVolumeRatio: [WATCH_STRATEGY.triggerMinBarVolumeRatio, WATCH_STRATEGY.triggerMaxBarVolumeRatio],
+        triggerMinScore: WATCH_STRATEGY.triggerMinScore,
+        stopAtr: WATCH_STRATEGY.stopAtr,
+        maxChaseAtr: WATCH_STRATEGY.maxChaseAtr,
+        rr: [WATCH_STRATEGY.rr1, WATCH_STRATEGY.rr2],
         riskPerTrade: '账户权益的 0.5%–1%',
       },
     },

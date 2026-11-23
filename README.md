@@ -45,12 +45,42 @@ OI 异动只说明杠杆在进场/离场，**不直接说明方向**。观察池
 每个币种给出：
 - 阶段、0–100 评分与 A/B/C 分级；
 - OI 结构保留比例、箱体上下沿、ATR、VWAP 偏离、资金费率、量比、24h 成交额；
-- 多空两套计划：触发位、止损、T1（1.5R）、T2（2.5R）、止损距离、是否已离开触发位；
+- 多空两套计划：触发位、止损、T1（2R）、T2（3R）、止损距离、是否已离开触发位；
+- 触发量能带：信号 bar / 前 20 根均量必须在 0.9–1.5x，过滤无量假突破和情绪高潮；
 - 失效条件清单（OI 回吐、价格破坏、超时、触发后止损）；
 - 阶段时间线与触发后的 MFE/MAE 跟踪；
 - 一键移出观察池。
 
 规则细节见 [WATCHLIST_STRATEGY.md](./WATCHLIST_STRATEGY.md)。
+
+### 回测（30 天真实历史）
+
+- 基线报告：[BACKTEST_REPORT.md](./BACKTEST_REPORT.md)
+- 优化报告：[OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)
+- 形态/量能报告：[MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)
+- 数据：Binance USD-M 官方日归档，5m K 线 + 5m OI
+- 区间：2026-10-24 ～ 2026-11-22 UTC，19 个山寨永续
+- 基线：640 个异动信号 → 124 笔触发；T1 胜率 39.8%，止损率 60.2%，平均 -0.17R
+- 优化档：62 笔触发；T1 胜率 45.9%，T2 32.8%，止损率 54.1%，平均 +0.27R
+- 默认量能档：30 笔触发；T1 胜率 55.2%，T2 41.4%，止损率 44.8%，平均 +0.54R，最大回撤 -2.20R
+
+```powershell
+python scripts\backtest\fetch_history.py
+npm run backtest:replay
+npm run backtest:replay:optimized
+npm run backtest:replay:volume
+npm run backtest:optimize
+npm run backtest:validate
+npm run backtest:morphology
+npm run backtest:morphology:validate
+npm run backtest:morphology:windows
+```
+
+观察池默认使用 `VOLUME_STRATEGY`（0.9–1.5x 触发量能带）；如需对照：
+```powershell
+$env:WATCH_STRATEGY_PROFILE='optimized'   # 62 笔优化档
+$env:WATCH_STRATEGY_PROFILE='legacy'      # 旧规则
+```
 
 ### 币种详情
 `/coin/[symbol]`：OI 序列、5m K 线、VWAP、资金费率、多空比、清算分布、分交易所 OI。
@@ -80,7 +110,7 @@ OI 异动只说明杠杆在进场/离场，**不直接说明方向**。观察池
 - 数据源：Binance Futures 公开接口（ticker、5m/1h/4h/1d OI、5m K 线、资金费率、多空比、清算等）。网络不可用时降级到内置演示数据，前端会显示 `dataSource`。
 - 轮询：ticker 8s、OI/K 线 40s、榜单与观察池 20s；前端轮询 10s。
 - 观察池持久化：`api/data/watchlist.json`，每 60s 落盘，重启后恢复 6 小时内未过期条目。
-- 配置：复制 `.env.example` 为 `.env` 可选；`JWT_SECRET`、`VIP_REQUIRED`，以及可选的 `WATCH_STORE_PATH`。
+- 配置：复制 `.env.example` 为 `.env` 可选；`JWT_SECRET`、`VIP_REQUIRED`、可选的 `WATCH_STORE_PATH`，以及 `WATCH_STRATEGY_PROFILE`（默认 `volume`，可设 `optimized` 或 `legacy`）。
 - 若健康检查返回 `dataSource=seed`，说明本机访问 `fapi.binance.com` 失败（常见于网络限制）。启动前设置可达的镜像/代理地址：`$env:BINANCE_FAPI='https://your-mirror.example.com'`。服务会先启动、后台重试，不会因为数据源不可达而打不开。
 
 ## 验证

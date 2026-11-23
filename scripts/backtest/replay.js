@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createWatchlist, STAGE_DEFS } = require('../../api/src/watchlist');
+const { createWatchlist, STAGE_DEFS, resolveStrategy, OPTIMIZED_STRATEGY, VOLUME_STRATEGY } = require('../../api/src/watchlist');
 
 const MIN = 60 * 1000;
 const TTL = 6 * 60 * MIN;
@@ -106,7 +106,7 @@ function window15(bars, i) {
 
 function buildRow(symbol, bars, oi, i, oiIdx, quotePrefix) {
   const bar = bars[i];
-  const knownBars = bars.slice(Math.max(0, i - 199), i + 1);
+  const knownBars = bars.slice(Math.max(0, i - 359), i + 1);
   const knownOi = oi.slice(Math.max(0, oiIdx - 99), oiIdx + 1);
   const w15 = window15(bars, i);
   const oiNow = oi[oiIdx] ? oi[oiIdx].oiUsdt : 0;
@@ -191,7 +191,7 @@ function aggregate(trades, label = '') {
   };
 }
 
-function evaluateTrade(t, bars, barByTs) {
+function evaluateTrade(t, bars, barByTs, { exitMode = 't1' } = {}) {
   const side = t.side;
   const i = barByTs.get(t.triggerBarTs);
   if (i == null) {
@@ -202,20 +202,40 @@ function evaluateTrade(t, bars, barByTs) {
   let t1 = false;
   let t2 = false;
   let stop = false;
+  let beStop = false;
   let exitPrice = 0;
   let exitTs = 0;
   let firstT1At = 0;
   const end = Math.min(bars.length - 1, i + HOLD_BARS);
   for (let j = i + 1; j <= end; j += 1) {
     const b = bars[j];
+    const stopLevel = exitMode === 'partial' && t1 ? entry : t.stop;
     if (side === 'long') {
-      if (b.low <= t.stop) { stop = true; exitPrice = t.stop; exitTs = b.ts; break; }
+      if (b.low <= stopLevel) {
+        stop = true;
+        beStop = exitMode === 'partial' && t1;
+        exitPrice = stopLevel;
+        exitTs = b.ts;
+        break;
+      }
       if (b.high >= t.target2) { t2 = true; exitPrice = t.target2; exitTs = b.ts; break; }
-      if (!t1 && b.high >= t.target1) { t1 = true; firstT1At = b.ts; }
+      if (!t1 && b.high >= t.target1) {
+        t1 = true;
+        firstT1At = b.ts;
+      }
     } else {
-      if (b.high >= t.stop) { stop = true; exitPrice = t.stop; exitTs = b.ts; break; }
+      if (b.high >= stopLevel) {
+        stop = true;
+        beStop = exitMode === 'partial' && t1;
+        exitPrice = stopLevel;
+        exitTs = b.ts;
+        break;
+      }
       if (b.low <= t.target2) { t2 = true; exitPrice = t.target2; exitTs = b.ts; break; }
-      if (!t1 && b.low <= t.target1) { t1 = true; firstT1At = b.ts; }
+      if (!t1 && b.low <= t.target1) {
+        t1 = true;
+        firstT1At = b.ts;
+      }
     }
   }
   if (!exitPrice) {
@@ -226,14 +246,24 @@ function evaluateTrade(t, bars, barByTs) {
 
   let outcome;
   if (t2) outcome = 'target2';
+  else if (stop && t1 && beStop) outcome = 't1_then_be';
   else if (stop && t1) outcome = 't1_then_stop';
   else if (stop) outcome = 'stopped';
   else if (t1) outcome = 't1_hold';
   else outcome = 'timeout';
 
-  // T1 策略按第一目标全平；t1_then_stop 对 T1 策略仍算赢，但单列提示。
-  if (t2 || t1) exitPrice = side === 'long' ? t.target1 : t.target1;
-  const grossR = risk > 0 ? (side === 'long' ? (exitPrice - entry) / risk : (entry - exitPrice) / risk) : 0;
+  let grossR = 0;
+  if (risk > 0) {
+    const rOf = (price) => (side === 'long' ? (price - entry) / risk : (entry - price) / risk);
+    if (exitMode === 't1') {
+      // 旧口径：T1 全平。即使之后摸到 T2，也只按 T1 计收益，T2 单独统计命中率。
+      grossR = t2 || t1 ? rOf(t.target1) : rOf(exitPrice);
+    } else if (exitMode === 'partial') {
+      grossR = t1 ? 0.5 * rOf(t.target1) + 0.5 * rOf(exitPrice) : rOf(exitPrice);
+    } else {
+      grossR = rOf(exitPrice);
+    }
+  }
   const costR = risk > 0 ? (entry * FEE_ROUND_TRIP) / risk : 0;
   const netR = grossR - costR;
 
@@ -260,7 +290,17 @@ function loadSymbol(symbol) {
   return { symbol, bars: klines, oi: metrics };
 }
 
-function main() {
+function run({
+  start = EVAL_START,
+  end = EVAL_END,
+  outDir = OUT,
+  strategy = {},
+  tag = '',
+  exitMode = 't1',
+  quiet = false,
+  write = true,
+} = {}) {
+  const cfg = resolveStrategy(strategy);
   const manifest = JSON.parse(fs.readFileSync(path.join(CACHE, 'manifest.json'), 'utf8'));
   const symbols = manifest.symbols;
   const btc = loadSymbol('BTCUSDT');
@@ -280,7 +320,7 @@ function main() {
     if (!s.bars.length || !s.oi.length) continue;
     const quotePrefix = prefixSums(s.bars, 'quoteVol');
     const barByTs = new Map(s.bars.map((b, i) => [b.ts, i]));
-    const watch = createWatchlist({ ttlMs: TTL, maxEntries: 80 });
+    const watch = createWatchlist({ ttlMs: TTL, maxEntries: 80, strategy: cfg });
     const entryMeta = new Map();
     const tradeMeta = new Map();
     let signals = 0;
@@ -289,8 +329,8 @@ function main() {
     for (let i = 0; i < s.bars.length; i += 1) {
       const bar = s.bars[i];
       const t = bar.ts + 5 * MIN;
-      if (t < EVAL_START) continue;
-      if (t >= EVAL_END) break;
+      if (t < start) continue;
+      if (t >= end) break;
       while (oiCursor + 1 < s.oi.length && s.oi[oiCursor + 1].ts <= t) oiCursor += 1;
       if (oiCursor < 1) continue;
       const oiNow = s.oi[oiCursor];
@@ -346,7 +386,7 @@ function main() {
         }
       }
 
-      watch.updateAll(new Map([[symbol, row]]), btcRow, t);
+      watch.updateAll(new Map([[symbol, row]]), btcRow, t - 1);
       const snaps = watch.list({ stage: 'all', limit: 100 });
       for (const e of snaps) {
         let meta = entryMeta.get(e.id);
@@ -362,13 +402,14 @@ function main() {
             symbol,
             side: e.triggered.side,
             at: e.triggered.at,
-            triggerBarTs: e.triggered.at - 5 * MIN,
+            triggerBarTs: Math.floor(e.triggered.at / (5 * MIN)) * (5 * MIN),
             entryPrice: e.triggered.price,
             trigger: e.triggered.trigger,
             stop: e.triggered.stop,
             target1: e.triggered.target1,
             target2: e.triggered.target2,
             volumeRatio: e.triggered.volumeRatio,
+            morphology: e.triggered.morphology,
             score: e.score,
             grade: e.grade,
             bias: e.bias,
@@ -382,9 +423,27 @@ function main() {
     }
 
     const entries = [...entryMeta.values()];
+    for (const e of watch.list({ stage: 'all', limit: 100 })) {
+      const meta = entryMeta.get(e.id);
+      if (!meta) continue;
+      meta.final = {
+        stage: e.stage,
+        score: e.score,
+        grade: e.grade,
+        bias: e.bias,
+        plan: e.plan,
+        lastBarHigh: e.metrics.lastBarHigh,
+        lastBarLow: e.metrics.lastBarLow,
+        boxWidthAtr: e.metrics.boxWidthAtr,
+        boxWidthPct: e.metrics.boxWidthPct,
+        oiRetentionPct: e.metrics.oiRetentionPct,
+        volumeRatio: e.metrics.volumeRatio,
+        invalidation: e.invalidation,
+      };
+    }
     allEntries.push(...entries);
     for (const t of tradeMeta.values()) {
-      const ev = evaluateTrade(t, s.bars, barByTs);
+      const ev = evaluateTrade(t, s.bars, barByTs, { exitMode });
       allTrades.push(ev);
     }
     const symTrades = allTrades.filter((t) => t.symbol === symbol);
@@ -399,7 +458,7 @@ function main() {
       triggered: symTrades.length,
       ...aggregate(symTrades, symbol),
     });
-    process.stdout.write(`[${symbol}] signals=${signals} entries=${entries.length} trades=${symTrades.length}\n`);
+    if (!quiet) process.stdout.write(`[${symbol}] signals=${signals} entries=${entries.length} trades=${symTrades.length}\n`);
   }
 
   const overall = aggregate(allTrades, 'all');
@@ -407,12 +466,15 @@ function main() {
   const bySide = ['long', 'short'].map((s) => aggregate(allTrades.filter((t) => t.side === s), s));
   const summary = {
     meta: {
-      period: '2026-10-24 ~ 2026-11-22 UTC',
-      evalDays: 30,
+      tag,
+      period: `${new Date(start).toISOString().slice(0, 10)} ~ ${new Date(end - 1).toISOString().slice(0, 10)} UTC`,
+      evalDays: Math.round((end - start) / (24 * 60 * MIN)),
       symbols,
+      strategy: cfg,
+      exitMode,
       dataSource: 'Binance USD-M futures daily archive (5m klines + 5m metrics)',
       funding: '归档不含资金费率，回放中按 0 处理；|funding|<0.12% 门槛实际未过滤',
-      execution: '信号 5m bar 收盘决策，下一根 bar 开始检查止损/目标；止损与目标同 bar 时止损优先',
+      execution: '信号 5m bar 收盘前 1ms 决策，箱体排除当前 bar，下一根 bar 开始检查止损/目标；止损与目标同 bar 时止损优先',
       costs: 'taker 0.04% + 滑点 0.02% 每边，往返 0.12%',
       hold: '触发后最多 24h',
       winDefinition: 'T1 在止损前触及；T2 单列；timeout 不计入胜率分母',
@@ -430,29 +492,52 @@ function main() {
     bySymbol: perSymbol,
   };
 
-  fs.mkdirSync(OUT, { recursive: true });
-  fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify(summary, null, 2));
-  fs.writeFileSync(path.join(OUT, 'trades.json'), JSON.stringify(allTrades, null, 2));
-  fs.writeFileSync(path.join(OUT, 'signals.json'), JSON.stringify(allSignals, null, 2));
-  console.log(JSON.stringify({
-    funnel: summary.funnel,
-    overall: {
-      trades: overall.trades,
-      resolved: overall.resolved,
-      t1Wins: overall.t1Wins,
-      t1Losses: overall.t1Losses,
-      target2: overall.target2,
-      t1ThenStop: overall.t1ThenStop,
-      timeouts: overall.timeouts,
-      winRateT1: overall.winRateT1,
-      winRateT1Ci95: overall.winRateT1Ci95,
-      winRateT2: overall.winRateT2,
-      avgNetR: overall.avgNetR,
-      medianNetR: overall.medianNetR,
-    },
-    byGrade,
-    bySide,
-  }, null, 2));
+  if (write) {
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2));
+    fs.writeFileSync(path.join(outDir, 'trades.json'), JSON.stringify(allTrades, null, 2));
+    fs.writeFileSync(path.join(outDir, 'signals.json'), JSON.stringify(allSignals, null, 2));
+    fs.writeFileSync(path.join(outDir, 'entries.json'), JSON.stringify(allEntries, null, 2));
+  }
+  if (!quiet) {
+    console.log(JSON.stringify({
+      tag,
+      funnel: summary.funnel,
+      overall: {
+        trades: overall.trades,
+        resolved: overall.resolved,
+        t1Wins: overall.t1Wins,
+        t1Losses: overall.t1Losses,
+        target2: overall.target2,
+        t1ThenStop: overall.t1ThenStop,
+        timeouts: overall.timeouts,
+        winRateT1: overall.winRateT1,
+        winRateT1Ci95: overall.winRateT1Ci95,
+        winRateT2: overall.winRateT2,
+        avgNetR: overall.avgNetR,
+        medianNetR: overall.medianNetR,
+      },
+      byGrade,
+      bySide,
+    }, null, 2));
+  }
+  return { summary, trades: allTrades, signals: allSignals, entries: allEntries };
 }
 
-main();
+if (require.main === module) {
+  const profile = process.env.BT_PROFILE || 'baseline';
+  const strategy = process.env.BT_STRATEGY
+    ? JSON.parse(process.env.BT_STRATEGY)
+    : profile === 'volume'
+      ? VOLUME_STRATEGY
+      : profile === 'optimized'
+        ? OPTIMIZED_STRATEGY
+        : {};
+  const tag = process.env.BT_TAG || (profile === 'volume' || profile === 'optimized' ? profile : '');
+  const start = process.env.BT_START ? Date.parse(process.env.BT_START) : EVAL_START;
+  const end = process.env.BT_END ? Date.parse(process.env.BT_END) : EVAL_END;
+  const outDir = process.env.BT_OUT || (tag === 'optimized' || tag === 'volume' ? path.join(OUT, tag) : tag ? path.join(OUT, 'variants', tag) : OUT);
+  run({ start, end, outDir, strategy, tag, exitMode: process.env.BT_EXIT_MODE || 't1' });
+}
+
+module.exports = { run, aggregate, evaluateTrade, wilson, median };

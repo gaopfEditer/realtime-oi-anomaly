@@ -19,14 +19,14 @@
 2. **跨交易所完整 OI 聚合**：Binance 为主；OKX/Gate 有则展示，Bybit/Bitget/HTX 仍是占位。
 3. **WebSocket / SSE**：仍是轮询，不是推送；ticker 8s、OI 40s 有固有延迟。
 4. **触发器通知**：观察池触发后只在页面展示，没有 webhook / 飞书 / Telegram 推送。
-5. **历史回测**：观察池规则有单测，但没有基于历史异动的胜率/盈亏回测。
+5. **历史回测、参数优化与形态测试已补齐（30 天）**：基线 T1 39.8%、平均 -0.17R；优化档 T1 45.9%、平均 +0.27R；当前默认量能档（触发 bar 0.9–1.5x）T1 55.2%、平均 +0.54R、最大回撤 -2.20R，但只剩 30 笔。详见 `BACKTEST_REPORT.md`、`OPTIMIZATION_REPORT.md`、`MORPHOLOGY_REPORT.md`、`STRATEGY_RESULTS.md`。仍缺资金费率、盘口滑点和 60–90 天严格 walk-forward。
 6. **AI 解读**：没有自动生成市场叙事；所有理由都是规则拼装。
 7. **生产级账号与计费**：演示账号写死；没有真实订阅、限流、审计。
 
 ## 建议 backlog
 
 1. 给 `/api/v1/watchlist` 的 `triggered` 事件加 webhook/飞书通知。
-2. 落盘 OI/异动历史，做观察池规则的滚动回测（按阶段统计触发率、止损率、MFE/MAE）。
+2. 基于已落地的回测缓存做 60–90 天严格 walk-forward，并把资金费率、盘口滑点补进回放。
 3. 接 Bybit/Bitget 公开 OI，补全跨交易所聚合。
 4. 用 SSE 替代观察池轮询，降低前端 10s 延迟。
 5. 增加“一键复制计划”和“计划执行记录”，把触发后的真实成交与 MFE/MAE 对照。

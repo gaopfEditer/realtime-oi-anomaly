@@ -9,7 +9,16 @@
     "dev:frontend": "cross-env NEXT_PUBLIC_API_URL=http://localhost:3101 npm run dev --prefix frontend",
     "verify": "node scripts/verify.js",
     "test:watch": "node scripts/test-watchlist.js",
-    "dev:frontend:alt": "cross-env NEXT_PUBLIC_API_URL=http://localhost:3101 npm run dev:alt --prefix frontend"
+    "backtest:fetch": "python scripts/backtest/fetch_history.py",
+    "backtest:replay": "node scripts/backtest/replay.js",
+    "backtest:replay:optimized": "cross-env BT_PROFILE=optimized node scripts/backtest/replay.js",
+    "dev:frontend:alt": "cross-env NEXT_PUBLIC_API_URL=http://localhost:3101 npm run dev:alt --prefix frontend",
+    "backtest:optimize": "node scripts/backtest/optimize.js",
+    "backtest:validate": "node scripts/backtest/validate.js",
+    "backtest:replay:volume": "cross-env BT_PROFILE=volume node scripts/backtest/replay.js",
+    "backtest:morphology": "node scripts/backtest/morphology.js",
+    "backtest:morphology:validate": "node scripts/backtest/morphology-validate.js",
+    "backtest:morphology:windows": "node scripts/backtest/morphology-windows.js"
   },
   "devDependencies": {
     "cross-env": "^7.0.3"

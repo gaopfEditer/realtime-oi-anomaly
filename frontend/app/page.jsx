@@ -456,6 +456,8 @@ function WatchDetail({ entry, nowTs, onDismiss, dismissBusy }) {
         <div className="wd-metric"><span>OI 保留</span><b>{m.oiRetentionPct}%</b><i>侦测后 {signedPct(m.oiSinceDetectPct)}</i></div>
         <div className="wd-metric"><span>资金费率</span><b>{m.fundingDisplay}</b><i>拥挤度参考</i></div>
         <div className="wd-metric"><span>量比</span><b>{m.volumeRatio}x</b><i>近 3 根 / 异动前</i></div>
+        <div className="wd-metric"><span>触发量</span><b>{m.barVolumeRatio}x</b><i>前 20 根均量 · 0.9–1.5</i></div>
+        <div className="wd-metric"><span>高周期</span><b>{m.tf15 === 'up' ? '多' : m.tf15 === 'down' ? '空' : '—'} / {m.tf1h === 'up' ? '多' : m.tf1h === 'down' ? '空' : '—'}</b><i>15m / 1h EMA8-21</i></div>
         <div className="wd-metric"><span>箱体</span><b>{formatPrice(m.boxLow)}–{formatPrice(m.boxHigh)}</b><i>{m.boxWidthAtr} ATR / {m.boxWidthPct}%</i></div>
         <div className="wd-metric"><span>ATR</span><b>{m.atrPct}%</b><i>5m · 止损基准</i></div>
         <div className="wd-metric"><span>VWAP</span><b>{formatPrice(m.vwap)}</b><i>现价偏离 {signedPct(m.vwapDistancePct)}</i></div>

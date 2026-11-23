@@ -6,3 +6,8 @@ node_modules/
 uploads/
 terminals/
 api/data/
+backtest-cache/
+.tmp-backtest/
+backtest-results/variants/
+backtest-results/validate/
+backtest-results/

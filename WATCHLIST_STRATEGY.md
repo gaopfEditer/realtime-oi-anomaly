@@ -1,6 +1,8 @@
 # 山寨币 OI 异动后的观察与入场策略
 
 > 本文写的是 `api/src/watchlist.js` 实际执行的规则，不是泛泛的交易心得。规则用于本地研究复盘，不构成投资建议。
+>
+> 当前线上默认 `WATCH_STRATEGY_PROFILE=volume`：止损 `0.45 ATR`、突破后追高上限 `0.5 ATR`、T1/T2 = `2R/3R`、触发评分 `≥62`，并增加**触发 bar 量能带 `0.9–1.5x`**（信号 bar 成交额 / 前 20 根均量）。`optimized` 保留为 62 笔档，`legacy` 为旧规则，用于 A/B 对照。优化过程见 `OPTIMIZATION_REPORT.md`，形态/量能测试见 `MORPHOLOGY_REPORT.md`。
 
 ## 1. 核心前提：OI 不是方向
 
@@ -82,6 +84,7 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 - 资金费率 `|funding| ≥ 0.12%` → 不允许进入 `setup`；`>0.06%` 给「多头/空头偏拥挤」警告。
 - 24h 成交额 `< $5M` → 流动性偏薄警告。不是硬否决，但仓位要降级。
 - 量比 = 异动后最近 3 根 5m 成交额均值 / 异动前 12 根均值；触发要求 `≥0.9`。
+- 触发 bar 量比 = 触发那根 5m 的 `quoteVolume` / 前 20 根（不含当根）均量；要求落在 `0.9–1.5x`。低于 0.9 是「没人跟」，高于 1.5 更像情绪高潮/衰竭，两端都过滤。
 
 ### 4.5 BTC 环境
 
@@ -96,21 +99,21 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 
 设：
 - `buffer = max(0.12 × ATR, 0.05% × price)`
-- `stopBuffer = max(0.25 × ATR, 0.05% × price)`
+- `stopBuffer = max(0.45 × ATR, 0.05% × price)`
 
 ### 多单
 
 - 触发：`boxHigh + buffer`
 - 止损：`boxLow − stopBuffer`
-- T1：`trigger + 1.5R`
-- T2：`trigger + 2.5R`
+- T1：`trigger + 2R`
+- T2：`trigger + 3R`
 
 ### 空单
 
 - 触发：`boxLow − buffer`
 - 止损：`boxHigh + stopBuffer`
-- T1：`trigger − 1.5R`
-- T2：`trigger − 2.5R`
+- T1：`trigger − 2R`
+- T2：`trigger − 3R`
 
 其中 `R = |trigger − stop|`。
 
@@ -131,12 +134,24 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 
 1. 阶段为 `setup` 或 `armed`；
 2. 最新 5m K 线的 high/low 突破对应触发位；
-3. 现价仍在触发位 `±0.35 ATR` 内（没有飞走）；
-4. `volumeRatio ≥ 0.9`；
-5. OI 结构保留 `≥40%`；
-6. BTC 没有强逆风。
+3. 现价没有跌回触发位下方超过 `−0.35 ATR`，也没有追到 `+0.5 ATR` 之外；
+4. `volumeRatio ≥ 0.9`（3 根均量相对异动前）；
+5. 触发 bar 量比 `0.9 ≤ barVolumeRatio ≤ 1.5`（相对前 20 根）；
+6. OI 结构保留 `≥40%`；
+7. 评分 `≥62`；
+8. BTC 没有强逆风。
 
-满足后阶段进入 `triggered`，记录触发时间、方向、价格、量比。
+满足后阶段进入 `triggered`，记录触发时间、方向、价格、量比、`morphology`（上下影线、收盘位置、触发 bar 量比、15m/1h EMA 趋势）。
+
+### 6.1 形态与多周期：先记录，不默认硬过滤
+
+`analyze()` 会计算以下字段，但当前默认档只把 `0.9–1.5x` 量能带当作硬条件：
+
+- 插针：上下影线占比、收盘位置、顺势/逆势影线；
+- 假突破：最高/最低穿过触发位但收盘收回；
+- 多周期：15m/1h EMA8/EMA21 趋势，只用已收盘完整桶。
+
+30 天样本里，硬加插针、假突破或多周期过滤都没有稳定跑赢控制组；原因见 `MORPHOLOGY_REPORT.md`。这些字段先用于观察和人工复核，不进入默认触发逻辑。
 
 ## 7. 失效条件
 
@@ -217,7 +232,26 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 ## 12. 参数在哪里改
 
 - 阶段与阈值：`api/src/watchlist.js` 的 `analyze` / `decisionFor` / `buildPlan`。
+- 策略档位：`DEFAULT_STRATEGY`（旧规则）、`OPTIMIZED_STRATEGY`（62 笔档）、`VOLUME_STRATEGY`（当前线上默认，0.9–1.5x 量能带）；也可用环境变量 `WATCH_STRATEGY_PROFILE=legacy` / `optimized` 切换。
 - 异动入池门槛：`api/src/index.js` 的 `qualifiesOiAnomaly()` 与 OI 阈值常量。
 - 观察有效期：`api/src/index.js` 的 `WATCH_TTL_MS`。
 - 更新频率：`BOARD_REFRESH_MS` / `WATCH_TICK_MS`。
 - 单测：`scripts/test-watchlist.js`，改规则后先跑 `npm run test:watch`。
+
+## 13. 历史回测与优化
+
+30 天基线回测见 [BACKTEST_REPORT.md](./BACKTEST_REPORT.md)：19 个山寨永续、640 个异动信号、124 笔触发；T1 胜率 39.8%，止损率 60.2%，平均 -0.17R。基线版本只能作为观察/预警层。
+
+优化档见 [OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)：止损放宽到 0.45 ATR、限制追高 0.5 ATR、T1/T2 改为 2R/3R、触发评分 ≥62。同一段 30 天样本上：
+
+- 触发 62 笔，T1 胜率 45.9%，T2 32.8%，止损率 54.1%；
+- 平均 +0.27R/笔，总 +16.9R，最大回撤 -10.6R；
+- 三个 10 天窗口分别为 +0.64R、+0.17R、+0.16R，均未转负；
+- 但平均 R 的 95% 置信区间仍跨 0（约 -0.10R ～ +0.64R），只能说明“方向改善”，不能证明长期有效。
+
+形态/量能默认档见 [MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)：在优化档基础上只增加触发 bar 量比 `0.9–1.5x`：
+
+- 触发 30 笔，T1 胜率 55.2%，T2 41.4%，止损率 44.8%；
+- 平均 +0.54R/笔，中位 +1.62R，总 +16.3R，最大回撤 -2.20R；
+- 三个 10 天窗口分别 57.1% / +0.64R、53.8% / +0.53R、55.6% / +0.49R；
+- 代价是交易数从 62 降到 30；平均 R 的 95% CI 约 +0.00R ～ +1.09R，仍贴着 0 边界，样本量不足以证明长期稳定。
