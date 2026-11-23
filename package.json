@@ -1,0 +1,14 @@
+{
+  "name": "mercu-clone-full",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local learning scaffold: crypto market monitor + VIP rankings (fake data)",
+  "scripts": {
+    "setup": "npm install --prefix api && npm install --prefix frontend",
+    "dev:api": "npm run dev --prefix api",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "verify": "node scripts/verify.js"
+  },
+  "keywords": ["crypto", "monitor", "market"],
+  "license": "MIT"
+}
