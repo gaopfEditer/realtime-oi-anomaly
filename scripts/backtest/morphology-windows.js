@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { run, wilson } = require('./replay');
+const { WINDOWS } = require('./config');
 const { OPTIMIZED_STRATEGY } = require('../../api/src/watchlist');
 
 const OUT = path.join(__dirname, '..', '..', 'backtest-results');
@@ -21,11 +22,7 @@ const candidates = [
   { tag: 'vol11-15', patch: { triggerMinBarVolumeRatio: 1.1, triggerMaxBarVolumeRatio: 1.5 } },
 ];
 
-const windows = [
-  { tag: 'w1', start: '2026-10-24', end: '2026-11-03' },
-  { tag: 'w2', start: '2026-11-03', end: '2026-11-13' },
-  { tag: 'w3', start: '2026-11-13', end: '2026-11-23' },
-];
+const windows = WINDOWS;
 
 function stat(trades) {
   const resolved = trades.filter((t) => t.t1Win || t.t1Loss);
@@ -46,8 +43,8 @@ const rows = [];
 for (const c of candidates) {
   const row = { tag: c.tag, patch: c.patch, windows: {} };
   for (const w of windows) {
-    const start = Date.parse(`${w.start}T00:00:00Z`);
-    const end = Date.parse(`${w.end}T00:00:00Z`);
+    const start = w.start;
+    const end = w.end;
     const r = run({
       strategy: { ...OPTIMIZED_STRATEGY, ...c.patch },
       start,
@@ -66,7 +63,7 @@ for (const c of candidates) {
 
 fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, 'morphology-windows.json'), JSON.stringify({
-  meta: { windows: windows.map((w) => `${w.start}~${w.end}`), base: 'opt62' },
+  meta: { windows: windows.map((w) => `${w.period} (${w.label})`), base: 'opt62' },
   rows,
 }, null, 2));
 console.log(`\nwrote ${path.join(OUT, 'morphology-windows.json')}`);

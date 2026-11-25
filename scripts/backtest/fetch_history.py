@@ -19,10 +19,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 DEFAULT_SYMBOLS = [
+    # 原有 19 个高流动性山寨
     "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT",
     "LINKUSDT", "SUIUSDT", "LTCUSDT", "DOTUSDT", "BCHUSDT",
     "TRXUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "NEARUSDT",
     "FILUSDT", "WIFUSDT", "1000PEPEUSDT", "ENAUSDT",
+    # 2026-11 扩容：L1/DeFi/AI/ meme/ gaming，覆盖不同 OI 结构
+    # TONUSDT 的 OI metrics 归档从 2026-10-04 起大面积缺失，暂不纳入。
+    "HBARUSDT", "ICPUSDT", "AAVEUSDT", "UNIUSDT",
+    "INJUSDT", "STXUSDT", "SEIUSDT", "TIAUSDT", "JUPUSDT",
+    "PYTHUSDT", "RENDERUSDT", "FETUSDT", "TAOUSDT", "KASUSDT",
+    "1000SHIBUSDT", "1000FLOKIUSDT", "1000BONKUSDT", "ORDIUSDT",
+    "ATOMUSDT", "ALGOUSDT", "VETUSDT", "GALAUSDT", "THETAUSDT",
+    "AXSUSDT", "CRVUSDT", "DYDXUSDT", "LDOUSDT", "WLDUSDT",
+    "ONDOUSDT", "EIGENUSDT", "HYPEUSDT", "PENDLEUSDT",
 ]
 BASE = "https://data.binance.vision/data/futures/um/daily"
 METRICS_HEADER = [
@@ -127,7 +137,7 @@ def process_symbol(symbol: str, days: list[date], out_root: str, with_metrics: b
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start", default="2026-10-23")
+    ap.add_argument("--start", default="2026-08-23")
     ap.add_argument("--end", default="2026-11-22")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "..", "backtest-cache"))
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))

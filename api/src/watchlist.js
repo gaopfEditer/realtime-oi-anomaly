@@ -102,6 +102,16 @@ const VOLUME_STRATEGY = Object.freeze({
   triggerMaxBarVolumeRatio: 1.5
 });
 
+// 2026-11 盈亏比实验档：
+// 保持 T1/T2 = 2R/3R，不把目标继续推高；把止损从 0.45 ATR 放宽到 0.55 ATR，
+// 降低被插针扫损的概率，同时保留量能带。回测 29 笔，T1 57.1%、平均 +0.601R、
+// 最大回撤 -2.19R；相比 volume 档单笔名义收益从 0.978% 提升到 1.155%。
+// 这是样本内候选档，默认仍是 volume，需用 WATCH_STRATEGY_PROFILE=rr 显式切换。
+const RR_STRATEGY = Object.freeze({
+  ...VOLUME_STRATEGY,
+  stopAtr: 0.55
+});
+
 function num(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -1176,6 +1186,7 @@ module.exports = {
   DEFAULT_STRATEGY,
   OPTIMIZED_STRATEGY,
   VOLUME_STRATEGY,
+  RR_STRATEGY,
   resolveStrategy,
   // 导出纯函数，便于单测与后续复用
   analyze,

@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { run } = require('./replay');
+const { PERIOD_LABEL } = require('./config');
 
 const ROOT = path.join(__dirname, '..', '..');
 const OUT = path.join(ROOT, 'backtest-results', 'optimize-grid.json');
@@ -88,7 +89,7 @@ function main() {
   rows.sort((a, b) => b.avgNetR - a.avgNetR);
   const payload = {
     generatedAt: new Date().toISOString(),
-    period: '2026-10-24 ~ 2026-11-22 UTC',
+    period: PERIOD_LABEL,
     note: '同一段样本内参数消融；优先看 avgNetR + 交易数，不把单次最优当样本外结论',
     rows,
   };

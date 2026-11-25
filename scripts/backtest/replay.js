@@ -10,14 +10,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createWatchlist, STAGE_DEFS, resolveStrategy, OPTIMIZED_STRATEGY, VOLUME_STRATEGY } = require('../../api/src/watchlist');
+const { createWatchlist, STAGE_DEFS, resolveStrategy, OPTIMIZED_STRATEGY, VOLUME_STRATEGY, RR_STRATEGY } = require('../../api/src/watchlist');
+const { EVAL_START, EVAL_END } = require('./config');
 
 const MIN = 60 * 1000;
 const TTL = 6 * 60 * MIN;
 const HOLD_BARS = 288; // 24h
 const FEE_ROUND_TRIP = 0.0012; // 0.12%
-const EVAL_START = Date.UTC(2026, 9, 24, 0, 0, 0); // 2026-10-24
-const EVAL_END = Date.UTC(2026, 10, 23, 0, 0, 0); // 2026-11-23 exclusive
 const CACHE = path.join(__dirname, '..', '..', 'backtest-cache');
 const OUT = path.join(__dirname, '..', '..', 'backtest-results');
 
@@ -530,13 +529,15 @@ if (require.main === module) {
     ? JSON.parse(process.env.BT_STRATEGY)
     : profile === 'volume'
       ? VOLUME_STRATEGY
-      : profile === 'optimized'
-        ? OPTIMIZED_STRATEGY
-        : {};
-  const tag = process.env.BT_TAG || (profile === 'volume' || profile === 'optimized' ? profile : '');
+      : profile === 'rr'
+        ? RR_STRATEGY
+        : profile === 'optimized'
+          ? OPTIMIZED_STRATEGY
+          : {};
+  const tag = process.env.BT_TAG || (['volume', 'optimized', 'rr'].includes(profile) ? profile : '');
   const start = process.env.BT_START ? Date.parse(process.env.BT_START) : EVAL_START;
   const end = process.env.BT_END ? Date.parse(process.env.BT_END) : EVAL_END;
-  const outDir = process.env.BT_OUT || (tag === 'optimized' || tag === 'volume' ? path.join(OUT, tag) : tag ? path.join(OUT, 'variants', tag) : OUT);
+  const outDir = process.env.BT_OUT || (['optimized', 'volume', 'rr'].includes(tag) ? path.join(OUT, tag) : tag ? path.join(OUT, 'variants', tag) : OUT);
   run({ start, end, outDir, strategy, tag, exitMode: process.env.BT_EXIT_MODE || 't1' });
 }
 

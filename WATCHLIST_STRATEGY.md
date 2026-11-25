@@ -232,7 +232,7 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 ## 12. 参数在哪里改
 
 - 阶段与阈值：`api/src/watchlist.js` 的 `analyze` / `decisionFor` / `buildPlan`。
-- 策略档位：`DEFAULT_STRATEGY`（旧规则）、`OPTIMIZED_STRATEGY`（62 笔档）、`VOLUME_STRATEGY`（当前线上默认，0.9–1.5x 量能带）；也可用环境变量 `WATCH_STRATEGY_PROFILE=legacy` / `optimized` 切换。
+- 策略档位：`DEFAULT_STRATEGY`（旧规则）、`OPTIMIZED_STRATEGY`（62 笔档）、`VOLUME_STRATEGY`（当前线上默认，0.9–1.5x 量能带）、`RR_STRATEGY`（rr 候选，止损 0.55 ATR，29 笔）；也可用环境变量 `WATCH_STRATEGY_PROFILE=legacy` / `optimized` / `rr` 切换。
 - 异动入池门槛：`api/src/index.js` 的 `qualifiesOiAnomaly()` 与 OI 阈值常量。
 - 观察有效期：`api/src/index.js` 的 `WATCH_TTL_MS`。
 - 更新频率：`BOARD_REFRESH_MS` / `WATCH_TICK_MS`。
@@ -255,3 +255,17 @@ OI（未平仓合约）增加，只说明有新的杠杆仓位建立；OI 减少
 - 平均 +0.54R/笔，中位 +1.62R，总 +16.3R，最大回撤 -2.20R；
 - 三个 10 天窗口分别 57.1% / +0.64R、53.8% / +0.53R、55.6% / +0.49R；
 - 代价是交易数从 62 降到 30；平均 R 的 95% CI 约 +0.00R ～ +1.09R，仍贴着 0 边界，样本量不足以证明长期稳定。
+
+盈亏比实验见 [RR_OPTIMIZATION.md](./RR_OPTIMIZATION.md)：保持 `2R/3R`，只把止损从 `0.45 ATR` 放宽到 `0.55 ATR`，并保留量能带：
+
+- 触发 29 笔，T1 胜率 57.1%，T2 39.3%，止损率 42.9%；
+- 平均 +0.601R/笔，总 +17.44R，最大回撤 -2.19R；
+- 单笔名义收益从 0.978% 提升到 1.155%；后 15 天 +0.473R，三个 10 天窗口 +0.644R / +0.537R / +0.661R；
+- 代价是交易数从 30 降到 29，且仍是 30 天样本内结果。默认未切换，需 `WATCH_STRATEGY_PROFILE=rr` 显式启用。
+
+**2026-11-24 91 天 / 51 币复测修正**：见 [EXPANDED_BACKTEST_91D.md](./EXPANDED_BACKTEST_91D.md)。
+
+- 量能档 0.45 ATR：286 笔，T1 37.0%，平均 +0.018R，总 +5.03R，最大回撤 -35.55R；
+- `rr` 0.55 ATR：271 笔，T1 36.1%，平均 -0.013R，总 -3.43R，最大回撤 -38.71R；
+- 前 60 天量能档 -0.037R/笔，最后 31 天 +0.246R/笔；正期望集中在最后一个月；
+- 91 天里 0.45 ATR 优于 0.55 ATR，`rr` 不再作为默认候选。线上继续使用 `VOLUME_STRATEGY`。

@@ -1,5 +1,9 @@
 # OI 异动观察策略：30 天回测结果汇总
 
+> **2026-11-24 更新**：本文主体是 30 天 / 19 币样本，已经被 91 天 / 51 币复测修正。
+> 91 天结果见 [EXPANDED_BACKTEST_91D.md](./EXPANDED_BACKTEST_91D.md)。
+> 关键变化：30 天里 `volume +0.543R`、`rr +0.601R` 的优势没有跨周期复现；91 天前 60 天为负，只有最后 31 天为正。
+>
 > 本文把基线档、优化档和当前默认量能档放在同一套回测口径下对比。更细的参数、逐笔分析和形态网格见：
 > [BACKTEST_REPORT.md](./BACKTEST_REPORT.md)、[OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)、[MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)。
 >
@@ -200,3 +204,31 @@ npm run backtest:morphology:windows
 - `backtest-results/morphology-grid.json`：形态/量能网格
 - `backtest-results/morphology-validate.json`：前后 15 天验证
 - `backtest-results/morphology-windows.json`：三个 10 天窗口
+
+## 10. 盈亏比控制实验
+
+详见 [RR_OPTIMIZATION.md](./RR_OPTIMIZATION.md)。核心结论：
+
+- 单纯把 T1 从 2R 推到 2.5R，平均 R 提高，但 T1 胜率下降、回撤变大；
+- **2R/3R + 止损 0.55 ATR + 0.9–1.5x 量能带** 是更平衡的候选；
+- 29 笔，T1 57.1%，T2 39.3%，止损率 42.9%，平均 +0.601R，总 +17.44R，最大回撤 -2.19R；
+- 单笔名义收益 1.155%；按 1u 保证金、20x，总 +6.70u，平均 +0.231u；
+- 默认仍是 `volume`，候选档通过 `WATCH_STRATEGY_PROFILE=rr` 切换；29 笔样本不足，暂不覆盖线上默认。
+
+## 11. 91 天 / 51 币扩容复测
+
+详见 [EXPANDED_BACKTEST_91D.md](./EXPANDED_BACKTEST_91D.md)。核心数字：
+
+| 策略 | 笔数 | T1 胜率 | 平均 R | 总 R | 最大回撤 R |
+|---|---:|---:|---:|---:|---:|
+| 基线 | 930 | 42.2% | -0.142 | -131.77 | -142.31 |
+| 优化档 0.45 ATR | 577 | 35.9% | -0.018 | -10.17 | -56.23 |
+| 量能档 0.45 ATR | 286 | 37.0% | +0.018 | +5.03 | -35.55 |
+| `rr` 0.55 ATR | 271 | 36.1% | -0.013 | -3.43 | -38.71 |
+
+关键修正：
+
+- 30 天的 `+0.543R` / `+0.601R` 没有跨周期复现；
+- 91 天前 60 天量能档 -0.037R/笔，最后 31 天 +0.246R/笔，正期望集中在最后一个月；
+- 51 币比 19 币交易数翻倍，但总 R 没有放大，单笔期望被稀释；
+- 默认继续保留 `volume 0.45 ATR`，不把 `rr 0.55 ATR` 设为默认。

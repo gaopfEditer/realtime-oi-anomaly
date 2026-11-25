@@ -1,5 +1,7 @@
 # 山寨币 OI 异动观察策略：30 天真实历史回测
 
+> **2026-11-24 更新**：本文是 30 天 / 19 币样本，已被 91 天 / 51 币复测修正。91 天结果见 [EXPANDED_BACKTEST_91D.md](./EXPANDED_BACKTEST_91D.md)。
+
 > 这是**基线规则**（止损 0.25 ATR、T1/T2=1.5R/2.5R）的回测。基于这份逐笔数据做的参数优化、分段验证和优化后结果，见 [OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)；当前默认的形态/量能档见 [MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)。
 
 ## 1. 结论先说

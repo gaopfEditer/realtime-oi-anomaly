@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { createWatchlist, VOLUME_STRATEGY } = require('../api/src/watchlist');
+const { createWatchlist, VOLUME_STRATEGY, RR_STRATEGY } = require('../api/src/watchlist');
 
 const MIN = 60 * 1000;
 const NOW = Date.UTC(2026, 10, 23, 8, 0, 0);
@@ -232,7 +232,9 @@ function testPersistence() {
   }
   const row = rowFor({ bars, oiSeries, price: 1.001 });
   const a = createWatchlist();
-  const w = a.register(anomalyAt(at), row, null, NOW);
+  // 持久化测试必须用真实当前时间；用固定 NOW 会在跨天后被 TTL 过滤，属于测试时间漂移。
+  const liveNow = Date.now();
+  a.register(anomalyAt(liveNow - 10 * MIN), row, null, liveNow);
   const dump = a.dump();
   const b = createWatchlist();
   const restored = b.restore(dump);
@@ -375,10 +377,20 @@ function testVolumeProfile() {
     'triggered', barVol, 'stage=', ok.stage);
 }
 
+function testRRProfile() {
+  assert.strictEqual(RR_STRATEGY.stopAtr, 0.55, 'rr profile should use 0.55 ATR stop');
+  assert.strictEqual(RR_STRATEGY.rr1, 2.0, 'rr profile keeps T1 at 2R');
+  assert.strictEqual(RR_STRATEGY.rr2, 3.0, 'rr profile keeps T2 at 3R');
+  assert.strictEqual(RR_STRATEGY.triggerMinBarVolumeRatio, 0.9, 'rr profile keeps volume lower bound');
+  assert.strictEqual(RR_STRATEGY.triggerMaxBarVolumeRatio, 1.5, 'rr profile keeps volume upper bound');
+  console.log('[rr] profile config ok: stop=0.55 ATR, RR=2/3, volume=0.9-1.5x');
+}
+
 testLowPricePrecision();
 testHappyPath();
 testOptimizedProfile();
 testVolumeProfile();
+testRRProfile();
 testOiGiveback();
 testExpiry();
 testPersistence();

@@ -1,19 +1,17 @@
 'use strict';
 
 /*
- * 对形态/多周期候选做全样本与前后 15 天分段验证。
+ * 对形态/多周期候选做全样本与前后 45/46 天分段验证。
  * 用法：node scripts/backtest/morphology-validate.js
  */
 
 const fs = require('fs');
 const path = require('path');
 const { run } = require('./replay');
+const { EVAL_START, TRAIN_END, EVAL_END, PERIOD_LABEL } = require('./config');
 const { OPTIMIZED_STRATEGY } = require('../../api/src/watchlist');
 
 const OUT = path.join(__dirname, '..', '..', 'backtest-results');
-const EVAL_START = Date.UTC(2026, 9, 24, 0, 0, 0);
-const EVAL_MID = Date.UTC(2026, 10, 8, 0, 0, 0);
-const EVAL_END = Date.UTC(2026, 10, 23, 0, 0, 0);
 
 const candidates = [
   { tag: 'opt62-control', patch: {} },
@@ -62,8 +60,8 @@ const rows = [];
 const details = {};
 for (const c of candidates) {
   const full = periodStats(c.patch, `${c.tag}-full`, EVAL_START, EVAL_END);
-  const train = periodStats(c.patch, `${c.tag}-train`, EVAL_START, EVAL_MID);
-  const test = periodStats(c.patch, `${c.tag}-test`, EVAL_MID, EVAL_END);
+  const train = periodStats(c.patch, `${c.tag}-train`, EVAL_START, TRAIN_END);
+  const test = periodStats(c.patch, `${c.tag}-test`, TRAIN_END, EVAL_END);
   const row = {
     tag: c.tag,
     patch: c.patch,
@@ -80,7 +78,7 @@ for (const c of candidates) {
 
 fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, 'morphology-validate.json'), JSON.stringify({
-  meta: { start: '2026-10-24', mid: '2026-11-08', end: '2026-11-22', base: 'opt62' },
+  meta: { period: PERIOD_LABEL, train: '2026-08-24 ~ 2026-10-07', test: '2026-10-08 ~ 2026-11-22', base: 'opt62' },
   rows,
 }, null, 2));
 console.log(`\nwrote ${path.join(OUT, 'morphology-validate.json')}`);

@@ -3,7 +3,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
-const { createWatchlist, DEFAULT_STRATEGY, OPTIMIZED_STRATEGY, VOLUME_STRATEGY } = require('./watchlist');
+const { createWatchlist, DEFAULT_STRATEGY, OPTIMIZED_STRATEGY, VOLUME_STRATEGY, RR_STRATEGY } = require('./watchlist');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -175,7 +175,9 @@ const WATCH_STRATEGY = WATCH_PROFILE === 'legacy'
   ? DEFAULT_STRATEGY
   : WATCH_PROFILE === 'optimized'
     ? OPTIMIZED_STRATEGY
-    : VOLUME_STRATEGY;
+    : WATCH_PROFILE === 'rr'
+      ? RR_STRATEGY
+      : VOLUME_STRATEGY;
 const WATCH_STORE_PATH = process.env.WATCH_STORE_PATH || path.join(__dirname, '..', 'data', 'watchlist.json'); // boards recompute ~20s (was 45s)
 const TARGET_FEED = 100; // denser feed (~mercu anomaly-v4 size)
 const BOARD_VALUE_N = 7;

@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { run } = require('./replay');
+const { PERIOD_LABEL } = require('./config');
 const { OPTIMIZED_STRATEGY } = require('../../api/src/watchlist');
 
 const OUT = path.join(__dirname, '..', '..', 'backtest-results');
@@ -129,7 +130,7 @@ function runGrid() {
     console.log(`${v.tag}\t${row.n} trades\tT1 ${(row.winRateT1 * 100).toFixed(1)}%\tavg ${row.avgNetR}R\ttotal ${row.totalR}R`);
   }
   fs.mkdirSync(OUT, { recursive: true });
-  fs.writeFileSync(GRID_FILE, JSON.stringify({ meta: { start: '2026-10-24', end: '2026-11-22', base: 'opt62' }, rows, results }, null, 2));
+  fs.writeFileSync(GRID_FILE, JSON.stringify({ meta: { period: PERIOD_LABEL, base: 'opt62' }, rows, results }, null, 2));
   console.log(`\nwrote ${GRID_FILE}`);
 }
 

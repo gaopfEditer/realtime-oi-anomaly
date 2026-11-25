@@ -53,22 +53,31 @@ OI 异动只说明杠杆在进场/离场，**不直接说明方向**。观察池
 
 规则细节见 [WATCHLIST_STRATEGY.md](./WATCHLIST_STRATEGY.md)。
 
-### 回测（30 天真实历史）
+### 回测（91 天真实历史 / 51 币）
 
+- 30 天旧结果备份：[backtest-results/30d](./backtest-results/30d)
+- 91 天扩容报告：[EXPANDED_BACKTEST_91D.md](./EXPANDED_BACKTEST_91D.md)
 - 基线报告：[BACKTEST_REPORT.md](./BACKTEST_REPORT.md)
 - 优化报告：[OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)
 - 形态/量能报告：[MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)
+- 盈亏比实验：[RR_OPTIMIZATION.md](./RR_OPTIMIZATION.md)
 - 数据：Binance USD-M 官方日归档，5m K 线 + 5m OI
-- 区间：2026-10-24 ～ 2026-11-22 UTC，19 个山寨永续
-- 基线：640 个异动信号 → 124 笔触发；T1 胜率 39.8%，止损率 60.2%，平均 -0.17R
-- 优化档：62 笔触发；T1 胜率 45.9%，T2 32.8%，止损率 54.1%，平均 +0.27R
-- 默认量能档：30 笔触发；T1 胜率 55.2%，T2 41.4%，止损率 44.8%，平均 +0.54R，最大回撤 -2.20R
+- 区间：2026-08-24 ～ 2026-11-22 UTC，91 个完整交易日；下载从 2026-08-23 开始预热
+- 币种：51 个山寨永续 + BTC 过滤；`TONUSDT` 因 OI 缺 42 天被剔除
+- 基线：6150 个异动信号 → 930 笔触发；T1 42.2%，止损率 57.8%，平均 -0.142R
+- 优化档：577 笔；T1 35.9%，T2 26.4%，止损率 64.1%，平均 -0.018R
+- 默认量能档：286 笔；T1 37.0%，T2 25.0%，止损率 63.0%，平均 +0.018R，总 +5.03R，最大回撤 -35.55R
+- `rr` 档：271 笔；T1 36.1%，平均 -0.013R，总 -3.43R；91 天里没有优于 0.45 ATR 量能档
+- 分段：量能档前 60 天 -0.037R/笔，最后 31 天 +0.246R/笔；正期望集中在最后一个月
 
 ```powershell
-python scripts\backtest\fetch_history.py
+python scripts\backtest\fetch_history.py --workers 45
+npm run backtest:repair
 npm run backtest:replay
 npm run backtest:replay:optimized
 npm run backtest:replay:volume
+npm run backtest:replay:rr
+npm run backtest:period
 npm run backtest:optimize
 npm run backtest:validate
 npm run backtest:morphology
@@ -76,9 +85,10 @@ npm run backtest:morphology:validate
 npm run backtest:morphology:windows
 ```
 
-观察池默认使用 `VOLUME_STRATEGY`（0.9–1.5x 触发量能带）；如需对照：
+观察池默认继续使用 `VOLUME_STRATEGY`（0.45 ATR，0.9–1.5x 触发量能带）；如需对照：
 ```powershell
-$env:WATCH_STRATEGY_PROFILE='optimized'   # 62 笔优化档
+$env:WATCH_STRATEGY_PROFILE='optimized'   # 91 天 577 笔，负期望
+$env:WATCH_STRATEGY_PROFILE='rr'          # 91 天 271 笔，未复现 30 天优势
 $env:WATCH_STRATEGY_PROFILE='legacy'      # 旧规则
 ```
 
