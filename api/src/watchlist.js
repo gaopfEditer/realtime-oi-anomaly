@@ -46,6 +46,10 @@ const DEFAULT_STRATEGY = Object.freeze({
   triggerMinRetentionPct: 40,
   triggerNearAtr: 0.35,
   triggerMinScore: 0,
+  // OI 不能单独用：开启后要求 OI/价格四象限与交易方向一致
+  quadrantFilter: false,
+  // 触发后最多持有多少根 5m bar；默认 288 = 24h，分层档可覆盖
+  maxHoldBars: 288,
   // 突破后价格离触发位超过该 ATR 倍数则不追；Infinity = 不限制（旧行为）
   maxChaseAtr: Infinity,
   // 是否要求信号 bar 收盘价也站在触发位之外，过滤“插针后收回”的假突破
@@ -426,6 +430,20 @@ function analyze(entry, row, btcRow, bars, now, strategy = DEFAULT_STRATEGY) {
   const priceSinceDetectPct = entry.impulse.priceAtDetect > 0
     ? ((price - entry.impulse.priceAtDetect) / entry.impulse.priceAtDetect) * 100
     : 0;
+  // OI/价格四象限：OI 方向 + 侦测后价格方向。不要只看 OI 增量。
+  const impulseOiPct = num(entry.impulse.oiPct, 0);
+  const quadrant = Math.abs(impulseOiPct) < 0.05 || Math.abs(priceSinceDetectPct) < 0.02
+    ? 'flat'
+    : impulseOiPct > 0
+      ? priceSinceDetectPct > 0 ? 'oi_up_price_up' : 'oi_up_price_down'
+      : priceSinceDetectPct > 0 ? 'oi_down_price_up' : 'oi_down_price_down';
+  const quadrantLabel = {
+    oi_up_price_up: 'OI↑价↑',
+    oi_up_price_down: 'OI↑价↓',
+    oi_down_price_up: 'OI↓价↑',
+    oi_down_price_down: 'OI↓价↓',
+    flat: 'OI/价格未分化',
+  }[quadrant];
   const w15 = (row && row.windows && row.windows['15m']) || {};
   const price15mPct = num(w15.pricePct, 0);
   const btc15mPct = num(btcRow && btcRow.windows && btcRow.windows['15m'] && btcRow.windows['15m'].pricePct, 0);
@@ -542,6 +560,7 @@ function analyze(entry, row, btcRow, bars, now, strategy = DEFAULT_STRATEGY) {
     `OI ${fmtPct(num(entry.impulse.oiPct, 0))} / ${fmtUsd(num(entry.impulse.oiDeltaAbs, 0), { signed: true })}（5m）`,
     `OI 结构保留 ${retention.toFixed(0)}%`,
     `价格较侦测 ${fmtPct(priceSinceDetectPct)}，${aboveVwap ? '在' : '低于'} VWAP`,
+    `OI/价格四象限：${quadrantLabel}`,
     `主动买入占比 ${(takerBuyRatio * 100).toFixed(1)}%，15m 相对 BTC ${fmtPct(relBtcPct)}`,
     `资金费率 ${fmtFunding(funding)}，24h 额 ${fmtUsd(quoteVol)}`,
     `BTC 15m ${fmtPct(btc15mPct)}`,
@@ -601,6 +620,8 @@ function analyze(entry, row, btcRow, bars, now, strategy = DEFAULT_STRATEGY) {
     oiSinceDetectPct: round(oiSinceDetectPct, 2),
     oiFromExtremePct: round(oiFromExtremePct, 2),
     priceSinceDetectPct: round(priceSinceDetectPct, 2),
+    quadrant,
+    quadrantLabel,
     price15mPct: round(price15mPct, 2),
     dayPct: round(num(row && row.change24h, 0), 2),
     relBtcPct: round(relBtcPct, 2),
@@ -689,6 +710,15 @@ function decisionFor(entry, a, bars, now, strategy = DEFAULT_STRATEGY) {
     return true;
   };
 
+  const quadrantOk = (side) => {
+    if (!s.quadrantFilter) return true;
+    if (s.allowedQuadrants && s.allowedQuadrants.length) return s.allowedQuadrants.includes(a.quadrant);
+    const allowed = side === 'long'
+      ? ['oi_up_price_up', 'oi_down_price_up']
+      : ['oi_up_price_down', 'oi_down_price_down'];
+    return allowed.includes(a.quadrant);
+  };
+
   const barVolumeOk = !(s.triggerMinBarVolumeRatio > 0)
     || num(a.morphology && a.morphology.barVolumeRatio, 0) >= s.triggerMinBarVolumeRatio;
   const barVolumeCapOk = !(Number.isFinite(s.triggerMaxBarVolumeRatio) && s.triggerMaxBarVolumeRatio > 0)
@@ -711,6 +741,7 @@ function decisionFor(entry, a, bars, now, strategy = DEFAULT_STRATEGY) {
     const longHit = longPlan.valid
       && morphologyOk('long')
       && mtfOk('long')
+      && quadrantOk('long')
       && a.lastBarHigh >= longPlan.trigger
       && a.price >= longPlan.trigger - a.atr * s.triggerNearAtr
       && a.price <= longPlan.trigger + maxChase
@@ -718,6 +749,7 @@ function decisionFor(entry, a, bars, now, strategy = DEFAULT_STRATEGY) {
     const shortHit = shortPlan.valid
       && morphologyOk('short')
       && mtfOk('short')
+      && quadrantOk('short')
       && a.lastBarLow <= shortPlan.trigger
       && a.price <= shortPlan.trigger + a.atr * s.triggerNearAtr
       && a.price >= shortPlan.trigger - maxChase

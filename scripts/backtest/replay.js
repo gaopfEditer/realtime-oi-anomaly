@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { createWatchlist, STAGE_DEFS, resolveStrategy, OPTIMIZED_STRATEGY, VOLUME_STRATEGY, RR_STRATEGY } = require('../../api/src/watchlist');
 const { EVAL_START, EVAL_END } = require('./config');
+const { liquidityTierOf, sectorOf } = require('./context');
 
 const MIN = 60 * 1000;
 const TTL = 6 * 60 * MIN;
@@ -77,8 +78,10 @@ function parseMetrics(file) {
   return out;
 }
 
-function qualifiesOiAnomaly(absPct, absDelta) {
+function qualifiesOiAnomaly(absPct, absDelta, strategy = {}) {
   if (!(absDelta > 0) || !Number.isFinite(absPct)) return false;
+  if (strategy.oiTriggerMinPct > 0 && absPct < strategy.oiTriggerMinPct) return false;
+  if (strategy.oiTriggerMinAbsUsd > 0 && absDelta < strategy.oiTriggerMinAbsUsd) return false;
   if (absPct < 0.5) return false;
   if (absPct < 1.2 && absDelta < 3e6) return false;
   if (absPct >= 2.0 && absDelta >= 3e5) return true;
@@ -190,7 +193,7 @@ function aggregate(trades, label = '') {
   };
 }
 
-function evaluateTrade(t, bars, barByTs, { exitMode = 't1' } = {}) {
+function evaluateTrade(t, bars, barByTs, { exitMode = 't1', maxHoldBars = HOLD_BARS } = {}) {
   const side = t.side;
   const i = barByTs.get(t.triggerBarTs);
   if (i == null) {
@@ -205,7 +208,8 @@ function evaluateTrade(t, bars, barByTs, { exitMode = 't1' } = {}) {
   let exitPrice = 0;
   let exitTs = 0;
   let firstT1At = 0;
-  const end = Math.min(bars.length - 1, i + HOLD_BARS);
+  const holdBars = Math.max(1, Number(maxHoldBars) || HOLD_BARS);
+  const end = Math.min(bars.length - 1, i + holdBars);
   for (let j = i + 1; j <= end; j += 1) {
     const b = bars[j];
     const stopLevel = exitMode === 'partial' && t1 ? entry : t.stop;
@@ -298,10 +302,12 @@ function run({
   exitMode = 't1',
   quiet = false,
   write = true,
+  symbols = null,
+  regimeAt = null,
 } = {}) {
   const cfg = resolveStrategy(strategy);
   const manifest = JSON.parse(fs.readFileSync(path.join(CACHE, 'manifest.json'), 'utf8'));
-  const symbols = manifest.symbols;
+  const universe = Array.isArray(symbols) && symbols.length ? symbols : manifest.symbols;
   const btc = loadSymbol('BTCUSDT');
   const btcByTs = new Map();
   const btcQuotePrefix = prefixSums(btc.bars, 'quoteVol');
@@ -314,7 +320,7 @@ function run({
   const allSignals = [];
   const perSymbol = [];
 
-  for (const symbol of symbols) {
+  for (const symbol of universe) {
     const s = loadSymbol(symbol);
     if (!s.bars.length || !s.oi.length) continue;
     const quotePrefix = prefixSums(s.bars, 'quoteVol');
@@ -346,7 +352,7 @@ function run({
       let anomaly = null;
       if (hasNewOi
         && oiNow.ts - oiPrev.ts <= 10 * MIN
-        && qualifiesOiAnomaly(absPct, absDelta)
+        && qualifiesOiAnomaly(absPct, absDelta, cfg)
         && absPct <= 25
         && !(absPct > 18 && oiNow.oiUsdt < 5e8)
         && !(absDelta > oiNow.oiUsdt * 0.35 && absPct > 15)) {
@@ -368,10 +374,20 @@ function run({
           oiDeltaPct: Number(pct.toFixed(2)),
           source: 'binance-vision',
         };
+      }
+
+      const tier = liquidityTierOf(row);
+      const sector = sectorOf(symbol);
+      const regime = regimeAt ? regimeAt(t) : 'unknown';
+      if (anomaly && Array.isArray(cfg.allowedLiquidityTiers) && !cfg.allowedLiquidityTiers.includes(tier)) anomaly = null;
+      if (anomaly && Array.isArray(cfg.allowedSectors) && !cfg.allowedSectors.includes(sector)) anomaly = null;
+      if (anomaly && Array.isArray(cfg.allowedRegimes) && !cfg.allowedRegimes.includes(regime)) anomaly = null;
+
+      if (anomaly) {
         const ret = watch.register(anomaly, row, btcRow, t);
         if (ret) {
           signals += 1;
-          allSignals.push({ symbol, ts: t, side, pct: anomaly.oiDeltaPct, absDelta });
+          allSignals.push({ symbol, ts: t, side: anomaly.side, pct: anomaly.oiDeltaPct, absDelta });
         }
         if (ret && !entryMeta.has(ret.id)) {
           entryMeta.set(ret.id, {
@@ -416,6 +432,12 @@ function run({
             boxWidthAtr: e.metrics.boxWidthAtr,
             atr: e.metrics.atr,
             planStopPct: e.plan ? e.plan[e.triggered.side].stopPct : 0,
+            liquidityTier: liquidityTierOf(row),
+            sector: sectorOf(symbol),
+            regime: regimeAt ? regimeAt(e.triggered.at) : 'unknown',
+            quoteVolume24h: row.quoteVolume24h,
+            oiUsdt: row.oiUsdt,
+            maxHoldBars: cfg.maxHoldBars || HOLD_BARS,
           });
         }
       }
@@ -442,7 +464,7 @@ function run({
     }
     allEntries.push(...entries);
     for (const t of tradeMeta.values()) {
-      const ev = evaluateTrade(t, s.bars, barByTs, { exitMode });
+      const ev = evaluateTrade(t, s.bars, barByTs, { exitMode, maxHoldBars: t.maxHoldBars || cfg.maxHoldBars || HOLD_BARS });
       allTrades.push(ev);
     }
     const symTrades = allTrades.filter((t) => t.symbol === symbol);
@@ -463,12 +485,17 @@ function run({
   const overall = aggregate(allTrades, 'all');
   const byGrade = ['A', 'B', 'C'].map((g) => aggregate(allTrades.filter((t) => t.grade === g), g));
   const bySide = ['long', 'short'].map((s) => aggregate(allTrades.filter((t) => t.side === s), s));
+  const byLiquidityTier = ['T1', 'T2', 'T3', 'T4'].map((v) => aggregate(allTrades.filter((t) => t.liquidityTier === v), v));
+  const bySector = [...new Set(allTrades.map((t) => t.sector || 'other'))].sort()
+    .map((v) => aggregate(allTrades.filter((t) => (t.sector || 'other') === v), v));
+  const byRegime = [...new Set(allTrades.map((t) => t.regime || 'unknown'))].sort()
+    .map((v) => aggregate(allTrades.filter((t) => (t.regime || 'unknown') === v), v));
   const summary = {
     meta: {
       tag,
       period: `${new Date(start).toISOString().slice(0, 10)} ~ ${new Date(end - 1).toISOString().slice(0, 10)} UTC`,
       evalDays: Math.round((end - start) / (24 * 60 * MIN)),
-      symbols,
+      symbols: universe,
       strategy: cfg,
       exitMode,
       dataSource: 'Binance USD-M futures daily archive (5m klines + 5m metrics)',
@@ -488,6 +515,9 @@ function run({
     overall,
     byGrade,
     bySide,
+    byLiquidityTier,
+    bySector,
+    byRegime,
     bySymbol: perSymbol,
   };
 
@@ -541,4 +571,20 @@ if (require.main === module) {
   run({ start, end, outDir, strategy, tag, exitMode: process.env.BT_EXIT_MODE || 't1' });
 }
 
-module.exports = { run, aggregate, evaluateTrade, wilson, median };
+module.exports = {
+  run,
+  aggregate,
+  evaluateTrade,
+  wilson,
+  median,
+  loadSymbol,
+  parseKlines,
+  parseMetrics,
+  buildRow,
+  buildBtcRow,
+  prefixSums,
+  rollingSum,
+  CACHE,
+  OUT,
+  HOLD_BARS,
+};

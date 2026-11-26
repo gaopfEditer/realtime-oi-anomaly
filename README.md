@@ -61,6 +61,10 @@ OI 异动只说明杠杆在进场/离场，**不直接说明方向**。观察池
 - 优化报告：[OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md)
 - 形态/量能报告：[MORPHOLOGY_REPORT.md](./MORPHOLOGY_REPORT.md)
 - 盈亏比实验：[RR_OPTIMIZATION.md](./RR_OPTIMIZATION.md)
+- 分层策略与回测：[LAYERED_STRATEGY.md](./LAYERED_STRATEGY.md)
+- 事件级 OI 策略与回测：[EVENT_OI_STRATEGIES.md](./EVENT_OI_STRATEGIES.md)
+- S1 止盈止损优化：[S1_EXIT_OPTIMIZATION.md](./S1_EXIT_OPTIMIZATION.md)
+- S1 质量过滤与资金分配：[S1_QUALITY_STRATEGY.md](./S1_QUALITY_STRATEGY.md)
 - 数据：Binance USD-M 官方日归档，5m K 线 + 5m OI
 - 区间：2026-08-24 ～ 2026-11-22 UTC，91 个完整交易日；下载从 2026-08-23 开始预热
 - 币种：51 个山寨永续 + BTC 过滤；`TONUSDT` 因 OI 缺 42 天被剔除
@@ -78,6 +82,11 @@ npm run backtest:replay:optimized
 npm run backtest:replay:volume
 npm run backtest:replay:rr
 npm run backtest:period
+npm run backtest:layered
+npm run backtest:event-study
+npm run backtest:event-strategies
+npm run backtest:event-param
+npm run backtest:event-placebo
 npm run backtest:optimize
 npm run backtest:validate
 npm run backtest:morphology
